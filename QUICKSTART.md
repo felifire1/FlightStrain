@@ -14,12 +14,17 @@ python3.11 -m venv .venv
 
 ### 2. Credentials
 
-Copy and fill in the placeholders:
+**Claude API key (secure local file):**
+```bash
+mkdir -p ~/.claude
+echo "your-api-key-here" > ~/.claude/api_key
+chmod 600 ~/.claude/api_key
+```
 
+**Other credentials (in .env):**
 ```bash
 cp .env.example .env
-# edit .env with your keys:
-#   ANTHROPIC_API_KEY=<from ASI at door>
+# edit .env with:
 #   OPENSKY_CLIENT_ID=<from opensky-network.org>
 #   OPENSKY_CLIENT_SECRET=<same>
 #   OPENSKY_USERNAME=<opensky login>
@@ -28,6 +33,8 @@ cp .env.example .env
 cp frontend/config.example.js frontend/config.js
 # edit with your Cesium Ion token
 ```
+
+Note: The app loads the Claude API key from `~/.claude/api_key` (recommended for security), with fallback to `ANTHROPIC_API_KEY` env var.
 
 ### 3. Start Services
 

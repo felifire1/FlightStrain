@@ -3,7 +3,7 @@
 Run:
     .venv/bin/python -m agent.loop "What's the weather at Boston right now and is it safe to fly?"
 
-Requires ANTHROPIC_API_KEY in env or .env.
+Loads ANTHROPIC_API_KEY from ~/.claude/api_key or ANTHROPIC_API_KEY env var.
 """
 from __future__ import annotations
 import json
@@ -17,6 +17,7 @@ load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 from anthropic import Anthropic  # noqa: E402
 from agent.tools import TOOLS, run_tool, MAP_ACTIONS  # noqa: E402
+from agent.api_key import get_anthropic_api_key  # noqa: E402
 
 
 def _clean_block(b) -> dict:
@@ -86,7 +87,7 @@ def chat(user_question: str, history: list[dict] | None = None, max_turns: int =
     """Run one user turn. Returns {text, map_actions, tool_trace, history}.
     `history` is the prior conversation in Anthropic message format; pass it back
     on the next call to maintain multi-turn context."""
-    client = Anthropic()
+    client = Anthropic(api_key=get_anthropic_api_key())
     messages = list(history or []) + [{"role": "user", "content": user_question}]
     MAP_ACTIONS.clear()
     tool_trace: list[dict] = []
@@ -145,7 +146,7 @@ def chat_stream(user_question: str, history: list[dict] | None = None, max_turns
       - {"type":"map_action","cmd":{...}}                — UI command to execute
       - {"type":"done","history":[...],"tool_trace":[...]}  — end of turn
     """
-    client = Anthropic()
+    client = Anthropic(api_key=get_anthropic_api_key())
     messages = list(history or []) + [{"role": "user", "content": user_question}]
     MAP_ACTIONS.clear()
     tool_trace: list[dict] = []
