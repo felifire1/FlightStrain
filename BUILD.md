@@ -142,8 +142,75 @@ labelled speculative.
 (`WeatherAgent._on_pireps` or directly in the chat/alert loop) and pass current
 `traffic_states` into `correlate()`. Backend logic + render contract are ready.
 
+## Industry Landscape — turbulence prediction (pitch research, 2026-05-30)
+
+Researched for pitch positioning. **The key strategic finding is the reframe in bold below.**
+
+**Four tiers of what's already out there:**
+1. **Forecast/nowcast (gov gold standard):** NOAA/NCAR **GTG** (EDR forecast, sfc→FL450, hourly to 18h) and **GTGN** — nowcast refreshed **every 15 min** that **already fuses in-situ EDR + PIREPs + radar (NTDA) + satellite with the forecast**.
+2. **Crowdsourced obs:** **IATA Turbulence Aware** (28 airlines, 2,800 aircraft, ~25M EDR reports H1 2025, redistributed in seconds); **SkyPath** (software-only, 500M reports/day, 12h AI nowcast, auto-PIREPs); Weather Company **Total Turbulence**.
+3. **Onboard:** EDR auto-reporting (Airbus/Honeywell), predictive weather radar.
+4. **Decision support / optimization:** **ASI Flyways** — route optimization over weather/winds/turbulence/traffic, 8h+ lookahead, dispatcher-in-the-loop, saved Alaska **1.2M gal in 2023**.
+
+**REFRAME (do not get this wrong in the pitch):** "PIREP + forecast fusion" is NOT novel — that is exactly what GTGN does, better. Do not claim the science. The white space is the **decision/communication last mile**: industry's own words — *"flight crews, controllers, and dispatchers do not always access the same information"*; dominant dispatch tactic is still crude (*"file lower or file normal with extra gas"*). No one ships an agent the dispatcher *talks to* that auto-correlates the turbulence field against *their specific live fleet* and returns per-flight action + drives the map.
+
+**Positioning:** Don't say "we predict turbulence." Say "we close the last mile — the operator's conversational copilot that turns any turbulence field into per-flight action." PIREP = our wedge + validation primitive, not our prediction engine. Roadmap line: *"Today we anchor on PIREPs (pilot ground truth); the same engine ingests IATA Turbulence Aware EDR and NOAA GTGN as drop-in sources"* (= rungs 4–5 of the turbulence-volume ladder). Differentiators vs GTGN/SkyPath (which are map/alert products): conversational multi-agent, automatic fleet correlation with ETAs, multi-voice, agent-driven map.
+
+**Headline numbers (closing slide):** turbulence = leading cause of Part 121 accidents (152/420 = 36%, 2008–2022); costs US airlines $150–500M/yr (Univ. Reading); flight attendants 24× injury risk; climate worsening CAT; Flyways saved Alaska 1.2M gal (2023).
+
+**Sources:** [GTGN (NCAR RAL)](https://ral.ucar.edu/solutions/products/graphical-turbulence-guidance-nowcast-gtgn), [IATA Turbulence Aware](https://www.iata.org/en/services/data/safety/turbulence-platform/), [SkyPath](https://skypath.io/), [Weather Company Total Turbulence](https://www.weathercompany.com/wp-content/uploads/2024/01/Total-Turbulence-solution-sheet-FINAL.pdf), [NTSB turbulence safety study SS2101](https://www.ntsb.gov/safety/safety-studies/Documents/SS2101.pdf), [Alaska/ASI Flyways](https://news.alaskaair.com/sustainability/how-ai-is-helping-alaska-airlines-plan-better-flight-routes-and-lower-emissions/).
+
 ### Track 2 (other window) — GTG/EDR feasibility spike
 Independent, no code overlap. Verify programmatic GTG/GTGN EDR grid access (NOMADS GRIB
 vs tile service), pull one FL slice for the NE corridor, write up endpoint/format/cadence
 + a `(lat,lon,fl,edr,valid_time)` voxel schema under a "## GTG Feasibility" section.
 Throwaway `scripts/probe_gtg.py`. This is rung 4 of the turbulence-volume ladder.
+
+---
+
+## Coordinator Handoff — 2026-05-30 ~11:15 EDT (from Felipe integration window)
+
+Context dump from the coordinator window so this tab can run a recap off the live
+tickets. **main is shared with Vishal; Felipe is the integration/staging branch.**
+
+### What's on `main` right now (`c35e697`)
+Three things landed and are live + import-verified:
+1. **`9836644`** — city-aware traffic resolution in `/api/chat` (named city → live OpenSky bbox; else cached NE snapshot). *(Felipe / ex-Worker A, reconciled to preserve Vishal's PR#1.)*
+2. **`c85d318`** — proactive alerts: `GET /api/alerts/stream` (SSE) + 30s background watcher + frontend subscribe (passive map actions only). *(Felipe / ex-Worker B, reconciled onto LLM-mode specialists.)*
+3. **`c35e697`** — Vishal's PR#2: **3 new agents** + `ARCHITECTURE.md` + `STRATEGY.md`. Server now runs **8 specialists**.
+
+### Vishal's 3 new agents (PatternAnalyst / ConflictPredictor / WindRouter)
+- **PatternAnalyst** — RandomForest conflict-risk ML (loads `data/models/conflict_model.pkl`).
+- **ConflictPredictor** — pairwise trajectory extrapolation, 5nm/1000ft separation geometry.
+- **WindRouter** — altitude/fuel optimization from seasonal wind lookup tables.
+
+### ⚠ VERIFIED: the new engines are DORMANT (only emit canned chat lines)
+- All three declare `interests=["user.question"]` only → **the watcher never fires them** (it emits `traffic.snapshot`).
+- `ConflictPredictor.predict_conflicts()` is **never called anywhere** → `active_conflicts` always empty → always answers "no separation violations." Real geometry never runs.
+- `predict_risk()` / `analyze_routing()` need a `flight` payload **nothing feeds**; `data/models/conflict_model.pkl` **does not exist** → `predict_risk` returns flat 0.5.
+- **Schema mismatch**: new agents want `lats[]/lons[]/cruise_altitude_ft/flight_number`; live OpenSky gives single-point `_STATE_FIELDS`. The two data worlds don't connect.
+
+### 🔑 The strategic pivot this exposes (needs a human decision)
+`STRATEGY.md`/`ARCHITECTURE.md` describe an **event-provided dataset we did NOT build for**:
+**11 scenarios / 162k flights, Southwest-US corridors** (Phoenix→Boise/Seattle/LA),
+`refc`/`retop` weather grids, ATC-sector GeoJSON w/ capacity. Our whole pipeline
+(auditor, recorder, traffic resolution, watcher, your turbulence-area work) is **live
+OpenSky Boston/NE-corridor**. **`data/scenarios/` does not exist on disk.** Open question
+that gates the rest of the build: *is the demo supposed to run on the provided scenario
+dataset or on our live BOS data?*
+
+### Live ticket board (mirrors coordinator BUILD.md)
+| ID | Owner | Status | Note |
+|----|-------|--------|------|
+| T1 | Worker A | ✅ done | multi-agent into `/api/chat` + LLM mode — main `c35e697` |
+| T2 | Worker B | ✅ done | SSE alerts + watcher — main `c85d318` |
+| T3 | Research | ⚠ partial / **BLOCKING** | problem dropped ~9:15 EDT but **text still not captured** — needs a human in the room |
+| T4 | Research | open | **get real problem text + confirm the SW-US scenario dataset** (did we receive it? where? demo on it or live BOS?) — unblocks everything |
+| T5 | Worker A | open | make the 3 agents actually fire (fix `interests`, watcher calls `predict_conflicts()` / feeds per-flight events) |
+| T6 | Worker B | open | one schema adapter so the same traffic feeds both worlds |
+| T7 | Worker A | open | produce or stub `conflict_model.pkl` so PatternAnalyst stops returning flat 0.5 |
+
+**Ask for this tab's recap:** synthesize the above against your existing Research Notes
+(esp. the turbulence-area Track 1 + the "last-mile" pitch reframe) and tell us: given the
+data-world question in T4, which demo path do we double down on, and what's the minimum
+wiring (T5–T7) that makes Vishal's agents real for the pitch rather than canned.
