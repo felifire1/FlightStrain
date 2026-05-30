@@ -1,29 +1,14 @@
-"""FastAPI server: serves the Cesium frontend, the multi-agent chat, and the
-proactive alert stream.
+"""FastAPI server: serves the Cesium frontend and exposes /api/chat.
 
 Single origin replaces the bare `python -m http.server` so the browser can POST
 to the agent without CORS heroics.
 
-Two integrated surfaces (merge of feature/A + feature/B):
-  - /api/chat[/stream] — backed by the **multi-agent specialist constellation**
-    (agent/specialists/). The Coordinator pulls findings from Weather / Traffic /
-    Safety / Fleet / Narrator, synthesizes one reply, composes map_actions.
-    LLM mode flips on automatically when an Anthropic key is configured
-    (else deterministic stub templates).
-  - /api/alerts/stream — Server-Sent Events. A background watcher polls NOAA
-    (G-AIRMET/SIGMET/PIREP), NWS alerts, and live OpenSky traffic every 30s,
-    routes them through the same constellation, runs cross-correlation
-    (incl. Track 1 PIREP-->turbulence-area and opt-in Track 2 convective wx),
-    and pushes high-severity findings to the browser unprompted.
-
 Run:
     .venv/bin/uvicorn agent.server:app --host 127.0.0.1 --port 8000 --reload
-    # convective track on:  WX_ASKED_AT=2025-08-22T18:00:00Z uvicorn ...
 """
 from __future__ import annotations
 import asyncio
 import glob
-import json
 import os
 import threading
 import time
@@ -34,109 +19,76 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from anthropic import Anthropic
 
 ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT / ".env")
 
+from agent.loop import chat, chat_stream  # noqa: E402
 from agent.api_key import get_anthropic_api_key  # noqa: E402
 from agent.opensky_auth import authed_get as opensky_get  # noqa: E402
-
-# Multi-agent specialists — the constellation that powers BOTH chat and alerts.
-from agent.specialists.base import Event, Finding  # noqa: E402
-from agent.specialists.bus import bus  # noqa: E402
 from agent.specialists.coordinator import Coordinator  # noqa: E402
 from agent.specialists.weather import WeatherAgent  # noqa: E402
 from agent.specialists.traffic import TrafficAgent  # noqa: E402
 from agent.specialists.safety import SafetyAgent  # noqa: E402
 from agent.specialists.fleet import FleetAgent  # noqa: E402
 from agent.specialists.narrator import NarratorAgent  # noqa: E402
-# Reuse data-fetch helpers from the dev console so the watcher doesn't duplicate
-# the NOAA / NWS plumbing. (Traffic uses the local _fetch_traffic_bbox below,
-# which returns dicts keyed for correlate().) Importing only defines functions.
+from agent.specialists.pattern_analyst import PatternAnalystAgent  # noqa: E402
+from agent.specialists.conflict_predictor import ConflictPredictorAgent  # noqa: E402
+from agent.specialists.wind_router import WindRouterAgent  # noqa: E402
+from agent.specialists.base import Event, Finding  # noqa: E402
+from agent.specialists.bus import bus  # noqa: E402
+# Reuse the data-fetch helpers from the dev console so the watcher doesn't
+# duplicate the NOAA / NWS plumbing. (Traffic uses the local _fetch_traffic_bbox
+# defined below, not dev_server's, to avoid two copies of the same fetch.)
 from agent.specialists.dev_server import (  # noqa: E402
     _weather_events,
     _nws_events,
     _traffic_event,
 )
-# Track 1 (window research): PIREP -> confirmed/inferred turbulence-area Findings
-# whose metadata["polygon"] feeds COORDINATOR.correlate(). Import, don't reimplement.
+import json  # noqa: E402
 import httpx  # noqa: E402
+# Track 1 (PIREP -> turbulence area) + Track 2 (HRRR convective) ingest.
+# Both emit Findings with metadata["polygon"] (lat,lon) -> feed COORDINATOR.correlate().
 from agent.tools import get_pireps  # noqa: E402
 from agent.turbulence_area import pireps_to_hazards  # noqa: E402
-# Track 2 (convective): HRRR refc/retop grids -> storm-cell Findings, same
-# metadata["polygon"] (lat,lon) contract. Import, don't reimplement.
 from agent import scenario_wx  # noqa: E402
 
 AW_API = "https://aviationweather.gov/api/data"  # NOAA aviation weather, keyless
 
-app = FastAPI(title="ASI Hack — 4D Airspace + Multi-Agent Ops Room")
+app = FastAPI(title="ASI Hack — 4D Airspace + Agent")
 
-# Static mounts. /frontend serves the Cesium UI; /data serves CZML and JSON
-# samples; existing relative paths like "../data/samples/traffic.czml" keep working.
-app.mount("/frontend", StaticFiles(directory=ROOT / "frontend"), name="frontend")
-app.mount("/data", StaticFiles(directory=ROOT / "data"), name="data")
-
-
-# --- the constellation ------------------------------------------------------
-
-# One shared constellation for the whole process — used by both the chat path
-# and the background alert watcher.
-SPECIALISTS = [WeatherAgent(), TrafficAgent(), SafetyAgent(), FleetAgent(), NarratorAgent()]
+# Initialize multi-agent specialists with LLM mode enabled
+SPECIALISTS = [
+    WeatherAgent(),
+    TrafficAgent(),
+    SafetyAgent(),
+    FleetAgent(),
+    NarratorAgent(),
+    PatternAnalystAgent(),
+    ConflictPredictorAgent(),
+    WindRouterAgent(),
+]
 COORDINATOR = Coordinator(specialists=SPECIALISTS)
 
-# Specialists use Sonnet; the Coordinator integrates everything. Both default to
-# Sonnet to stay cost-safe; override via env (e.g. haiku to cut watcher latency).
-SPECIALIST_MODEL = os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-6")
-COORDINATOR_MODEL = os.environ.get("COORDINATOR_MODEL", SPECIALIST_MODEL)
+# Inject LLM function into all specialists and coordinator
+def _llm_call(system: str, user: str, tools: list | None = None) -> str:
+    """LLM reasoning for specialists. Uses Claude Sonnet for speed."""
+    client = Anthropic(api_key=get_anthropic_api_key())
+    resp = client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=512,
+        system=system,
+        messages=[{"role": "user", "content": user}],
+    )
+    return "".join(b.text for b in resp.content if b.type == "text")
 
-# Mode is "stub" until inject_llm succeeds; reported on /api/health. NOTE: this
-# flips the *shared* constellation, so the 30s watcher's specialists also go LLM.
-# If that costs too much latency/tokens for the demo, set CLAUDE_MODEL=haiku-... .
-LLM_MODE = "stub"
+for specialist in SPECIALISTS + [COORDINATOR]:
+    specialist.inject_llm(_llm_call)
 
-
-def _wire_llm() -> None:
-    """Flip every specialist + the Coordinator into LLM mode by injecting an
-    Anthropic caller. No-op (stay in stub mode) if no API key is configured, so
-    the server still boots and answers with deterministic templates."""
-    global LLM_MODE
-    try:
-        api_key = get_anthropic_api_key()
-    except FileNotFoundError as e:
-        print(f"[server] no Anthropic key found, specialists stay in stub mode: {e}", flush=True)
-        return
-
-    from anthropic import Anthropic
-
-    client = Anthropic(api_key=api_key)
-
-    def make_caller(model: str):
-        def llm_call(system_prompt: str, user_msg: str, tools: list) -> str:
-            resp = client.messages.create(
-                model=model,
-                max_tokens=512,
-                system=system_prompt,
-                messages=[{"role": "user", "content": user_msg}],
-            )
-            return "".join(b.text for b in resp.content if b.type == "text")
-        return llm_call
-
-    specialist_caller = make_caller(SPECIALIST_MODEL)
-    for s in SPECIALISTS:
-        s.inject_llm(specialist_caller)
-    COORDINATOR.inject_llm(make_caller(COORDINATOR_MODEL))
-    LLM_MODE = "llm"
-    print(f"[server] specialists in LLM mode (specialists={SPECIALIST_MODEL}, "
-          f"coordinator={COORDINATOR_MODEL})", flush=True)
-
-
-_wire_llm()
-
-
-# --- watcher / convective config --------------------------------------------
-
-# NE-corridor watch box — matches the overnight recorder's coverage so the
-# live OpenSky pull lines up with cached traffic if we have to fall back.
+# NE-corridor watch box for the proactive-alert watcher — matches the overnight
+# recorder's coverage so the live OpenSky pull lines up with cached traffic if
+# we have to fall back.
 WATCH_CENTER = (42.0, -71.5)
 WATCH_RADIUS_DEG = 2.5
 WATCH_INTERVAL_SEC = 30
@@ -152,8 +104,13 @@ _watcher: dict[str, Any] = {
     "wx_strip_idx": 0, "wx_disabled": False, "wx_last_error": None, "wx_cells": 0,
 }
 
+# Static mounts. /frontend serves the Cesium UI; /data serves CZML and JSON
+# samples; existing relative paths like "../data/samples/traffic.czml" keep working.
+app.mount("/frontend", StaticFiles(directory=ROOT / "frontend"), name="frontend")
+app.mount("/data", StaticFiles(directory=ROOT / "data"), name="data")
 
-# --- traffic resolution -----------------------------------------------------
+
+# --- traffic resolution (net-new; does not alter the LLM wiring above) ------
 
 _STATE_FIELDS = [
     "icao24", "callsign", "origin_country", "time_position", "last_contact",
@@ -179,9 +136,8 @@ def _recorder_states() -> list[dict]:
 
 
 def _fetch_traffic_bbox(lat: float, lon: float, rad_deg: float = 0.6) -> list[dict]:
-    """Live-fetch OpenSky state vectors for a bbox centered on (lat, lon),
-    returning dicts keyed by _STATE_FIELDS (lat/lon/baro_alt/velocity/heading/
-    on_ground — exactly what correlate() consumes). ~1 OpenSky credit per call."""
+    """Live-fetch OpenSky state vectors for a bbox centered on (lat, lon).
+    ~1 OpenSky credit per call; used when the user names a known city/airport."""
     params = {
         "lamin": lat - rad_deg, "lamax": lat + rad_deg,
         "lomin": lon - rad_deg, "lomax": lon + rad_deg,
@@ -213,14 +169,14 @@ def _resolve_traffic(message: str) -> list[dict]:
     return _recorder_states()
 
 
-# --- routes -----------------------------------------------------------------
-
 @app.get("/")
 def root():
     return FileResponse(ROOT / "frontend" / "index.html")
 
 
-# Stateless server for the hackathon: one global history, client passes it back.
+# Pinned conversation history per browser session would normally key by cookie
+# or token. For a hackathon demo we keep one global history and let the client
+# pass it back on each request — stateless server, simpler.
 
 @app.post("/api/chat")
 async def api_chat(req: Request):
@@ -230,6 +186,8 @@ async def api_chat(req: Request):
     if not msg:
         return JSONResponse({"error": "empty message"}, status_code=400)
     try:
+        # Use multi-agent coordinator (LLM mode enabled).
+        # Resolve traffic so location-aware questions can filter aircraft.
         states = _resolve_traffic(msg)
         result = COORDINATOR.handle_user(msg, history=history, traffic_states=states)
     except Exception as e:
@@ -239,11 +197,7 @@ async def api_chat(req: Request):
 
 @app.post("/api/chat/stream")
 async def api_chat_stream(req: Request):
-    """NDJSON stream of {type, ...} events. The Coordinator's handle_user() is
-    synchronous and returns a complete result, so we adapt it into the streaming
-    event shape the frontend already understands: tool_use chips, map_action
-    commands, then the synthesized text as one text_delta, then done (carrying
-    history + the multi-agent `voices` list)."""
+    """NDJSON stream of {type, ...} events. Frontend reads line-by-line."""
     body = await req.json()
     msg = (body.get("message") or "").strip()
     history = body.get("history") or []
@@ -252,24 +206,10 @@ async def api_chat_stream(req: Request):
 
     def gen():
         try:
-            states = _resolve_traffic(msg)
-            result = COORDINATOR.handle_user(msg, history=history, traffic_states=states)
+            for ev in chat_stream(msg, history=history):
+                yield json.dumps(ev) + "\n"
         except Exception as e:
             yield json.dumps({"type": "error", "message": f"{type(e).__name__}: {e}"}) + "\n"
-            return
-
-        for tool in result.get("tool_trace") or []:
-            yield json.dumps({"type": "tool_use", "name": tool.get("name"),
-                              "args": tool.get("args") or {}}) + "\n"
-        for cmd in result.get("map_actions") or []:
-            yield json.dumps({"type": "map_action", "cmd": cmd}) + "\n"
-        yield json.dumps({"type": "text_delta", "delta": result.get("text") or ""}) + "\n"
-        yield json.dumps({
-            "type": "done",
-            "history": result.get("history") or history,
-            "tool_trace": result.get("tool_trace") or [],
-            "voices": result.get("voices") or [],
-        }) + "\n"
 
     return StreamingResponse(gen(), media_type="application/x-ndjson")
 
@@ -277,12 +217,22 @@ async def api_chat_stream(req: Request):
 # ============================================================
 # PROACTIVE ALERTS — background watcher + SSE push
 # ============================================================
+# A background task polls NOAA (G-AIRMET/SIGMET/PIREP), NWS active alerts, and
+# OpenSky every WATCH_INTERVAL_SEC, routes the raw data through every
+# interested specialist, and runs the Coordinator's cross-correlation pass.
+# Specialists publish findings onto the bus; the SSE endpoint tails the bus and
+# forwards anything at/above the push threshold to subscribed browsers, which
+# render them in the chat panel unprompted.
+
 
 def _collect_events() -> list[Event]:
-    """Blocking data pull for one watcher tick (runs in a thread). Traffic
-    prefers a live OpenSky pull for the watch box; on empty (auth/rate limit) it
-    falls back to the recorder snapshot so the safety/correlation passes still
-    have aircraft."""
+    """Blocking data pull for one watcher tick. Runs in a thread so the event
+    loop is never blocked on httpx/OpenSky I/O.
+
+    Traffic prefers a live OpenSky pull for the watch box; if that comes back
+    empty (auth hiccup / rate limit) we fall back to the recorder's cached
+    snapshot so the safety + correlation passes still have aircraft to chew on.
+    """
     evs: list[Event] = _weather_events(live=True)
     evs.extend(_nws_events())
 
@@ -298,8 +248,8 @@ def _collect_events() -> list[Event]:
 
 def _fetch_advisories_raw() -> list[dict]:
     """RAW G-AIRMET + SIGMET advisory dicts (each carrying `coords`) for the
-    turbulence-area corroboration step — NOT the digested tool versions, which
-    strip the polygon geometry pireps_to_hazards needs."""
+    turbulence-area corroboration — NOT the digested tool versions, which strip
+    the polygon geometry pireps_to_hazards needs."""
     out: list[dict] = []
     for path in ("gairmet", "airsigmet"):
         try:
@@ -313,9 +263,9 @@ def _fetch_advisories_raw() -> list[dict]:
 
 
 def _fetch_turbulence_inputs() -> tuple[list[dict], list[dict]]:
-    """Blocking pull of the two turbulence-area inputs for the watch box:
-    digested PIREPs (get_pireps' `reports` shape) and RAW G-AIRMET/SIGMET
-    advisories with polygons. Runs in a thread."""
+    """Blocking pull of the two Track-1 inputs for the watch box: digested PIREPs
+    (get_pireps' `reports` shape) and RAW G-AIRMET/SIGMET advisories with
+    polygons. Runs in a thread."""
     lat, lon = WATCH_CENTER
     rad = WATCH_RADIUS_DEG
     try:
@@ -327,10 +277,10 @@ def _fetch_turbulence_inputs() -> tuple[list[dict], list[dict]]:
 
 
 def _collect_convective(strip_idx: int) -> tuple[list[Finding], tuple[float, float] | None]:
-    """Blocking pull for one convective-track tick (runs in a thread). Picks the
-    strip at `strip_idx` (wrapping over the ~73-strip, 18h forecast), contours
-    refc>=WX_DBZ into storm-cell Findings, returns the strongest WX_MAX_CELLS
-    plus the centroid of the strongest cell (where to look for traffic)."""
+    """Blocking pull for one convective-track tick (runs in a thread — np.load is
+    blocking). Picks the strip at `strip_idx` (wrapping over the ~73-strip, 18h
+    forecast), contours refc>=WX_DBZ into storm-cell Findings, returns the
+    strongest WX_MAX_CELLS plus the centroid of the strongest cell."""
     strips = scenario_wx.list_strips(WX_ASKED_AT, "refc")
     if not strips:
         return [], None
@@ -374,6 +324,8 @@ async def _alert_watcher() -> None:
                     COORDINATOR.correlate(traffic_states, hazards)
 
             # --- Track 1: PIREP -> turbulence-area hazards -> transit prediction ---
+            # Pilot ground-truth turned into confirmed/inferred area Findings, then
+            # projected against the same traffic snapshot.
             pireps, advisories = await asyncio.to_thread(_fetch_turbulence_inputs)
             turb_hazards = pireps_to_hazards(pireps, advisories, min_intensity="MOD")
             for hz in turb_hazards:
@@ -423,13 +375,19 @@ async def _start_watcher() -> None:
 @app.get("/api/alerts/stream")
 async def alerts_stream(request: Request):
     """Server-Sent Events stream of high-severity (>=PUSH_THRESHOLD) findings.
-    Subscribes to the in-process bus; a daemon thread bridges the blocking
-    iterator into an asyncio.Queue; the async generator drains it, emits
-    keepalives, and tears down on client disconnect."""
+
+    Subscribes to the in-process bus and forwards each qualifying finding as an
+    SSE `data:` frame carrying the finding's `chat_render()` payload. The bus's
+    blocking subscribe() iterator runs in a daemon thread that bridges into an
+    asyncio.Queue; the async generator drains the queue, emits keepalives, and
+    tears the bridge down when the client disconnects.
+    """
     loop = asyncio.get_running_loop()
     aq: asyncio.Queue = asyncio.Queue()
     stop = threading.Event()
-    start_ts = time.time()  # skip the bus's ring-replay backlog
+    # Skip the ring-replay backlog the bus hands a new subscriber — we only want
+    # to push findings that land *after* this client connected.
+    start_ts = time.time()
 
     def pump() -> None:
         gen = bus.subscribe()
@@ -450,7 +408,7 @@ async def alerts_stream(request: Request):
                 try:
                     item = await asyncio.wait_for(aq.get(), timeout=15.0)
                 except asyncio.TimeoutError:
-                    yield ": keepalive\n\n"
+                    yield ": keepalive\n\n"  # comment frame — keeps proxies warm
                     continue
                 ts = getattr(item, "timestamp", 0) or 0
                 if ts < start_ts:
@@ -466,7 +424,7 @@ async def alerts_stream(request: Request):
         headers={
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
+            "X-Accel-Buffering": "no",  # disable nginx buffering if proxied
         },
     )
 
@@ -495,13 +453,7 @@ def alerts_status():
 def health():
     return {
         "status": "ok",
-        "mode": LLM_MODE,
         "anthropic_key": bool(os.environ.get("ANTHROPIC_API_KEY")),
         "opensky_authed": bool(os.environ.get("OPENSKY_CLIENT_ID")),
-        "specialists": [s.name for s in SPECIALISTS],
-        "specialist_model": SPECIALIST_MODEL,
-        "coordinator_model": COORDINATOR_MODEL,
-        "watcher_running": bool(_watcher["task"] and not _watcher["task"].done()),
-        "convective_enabled": bool(WX_ASKED_AT),
-        "findings_in_bus": len(bus.latest(1000)),
+        "model": os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-6"),
     }
