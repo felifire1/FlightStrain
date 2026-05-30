@@ -65,12 +65,86 @@ def get_fleet_impact(asked_at: str, force_dry_run: bool) -> tuple[dict, bool]:
         try:
             from agent.impact import fleet_impact  # type: ignore
             data = fleet_impact(asked_at)
-            if data and data.get("n_transiting"):
-                return data, False
+            if data and (data.get("n_flights") or data.get("n_transiting")):
+                return _adapt_impact(data), False
         except Exception as e:  # not built yet, or errored — fall back
             print(f"[report] agent.impact unavailable ({type(e).__name__}: {e}); using --dry-run",
                   file=sys.stderr)
     return _synthetic_fleet(asked_at), True
+
+
+# kind (impact.py) -> axis (report glyphs)
+_KIND2AXIS = {"lateral": "around", "climb": "up", "wait": "wait", "speed": "speed", "down": "down"}
+_AXIS_NOTE = {"up": "echo tops below service ceiling",
+              "wait": "cell clears the fix within minutes",
+              "around": "tall cell, no room to climb"}
+
+
+def _adapt_impact(d: dict) -> dict:
+    """Map agent.impact.fleet_impact()'s schema -> the renderer's schema.
+    Per-flight rows use impact.cheapest()/score() to pick + price each plan's
+    chosen maneuver. Table capped to top rows by turbulence avoided."""
+    if "n_transiting" in d:  # already in render schema
+        return d
+    from agent.impact import cheapest, score
+
+    t4 = d.get("totals_4d", {}) or {}
+    t2 = d.get("totals_2d", {}) or {}
+
+    by = {}
+    for kind, b in (d.get("breakdown", {}) or {}).items():
+        axis = _KIND2AXIS.get(kind, kind)
+        n = b.get("n", 0) or 0
+        by[axis] = {
+            "flights": n,
+            "avg_fuel_gal": round((b.get("fuel_gal", 0) or 0) / n, 1) if n else 0,
+            "avg_delay_min": round((b.get("delay_min", 0) or 0) / n, 1) if n else 0,
+            "note": _AXIS_NOTE.get(axis, ""),
+        }
+
+    flights = []
+    for plan in d.get("plans", []) or []:
+        try:
+            opt = cheapest(plan, plan.actype)
+            sc = score(opt, plan.actype)
+            flights.append({
+                "callsign": getattr(plan, "callsign", "—"),
+                "actype": getattr(plan, "actype", "—"),
+                "eta_min": "—",  # plan carries no ETA; omit rather than fabricate
+                "maneuver": _KIND2AXIS.get(getattr(opt, "kind", ""), getattr(opt, "kind", "")),
+                "fuel_gal": round(sc.get("fuel_gal", 0), 1),
+                "delay_min": round(sc.get("delay_min", 0)),
+                "turb_min_avoided": round(sc.get("turb_min_avoided", 0), 1),
+                "pax": int(sc.get("pax", 0)),
+                "note": getattr(opt, "label", ""),
+            })
+        except Exception:
+            continue
+    flights.sort(key=lambda f: f["turb_min_avoided"], reverse=True)
+
+    fuel4 = t4.get("fuel_gal", 0) or 0
+    fuel2 = t2.get("fuel_gal", 0) or 0
+    fuel_pct = round((1 - fuel4 / fuel2) * 100) if fuel2 else 0
+    return {
+        "asked_at": d.get("asked_at"),
+        "n_transiting": d.get("n_flights", len(flights)),
+        "n_avoidable": d.get("n_flights", len(flights)),
+        "totals": {
+            "fuel_gal": round(fuel4),
+            "delay_min": round(t4.get("delay_min", 0)),
+            "co2_kg": round(t4.get("co2_kg", 0)),
+            "pax": int(t4.get("pax", 0)),
+            "turb_min_avoided": round(t4.get("turb_min_avoided", 0)),
+        },
+        "twod_fuel_gal": round(fuel2),
+        "fourd_fuel_gal": round(fuel4),
+        "fuel_savings_pct": fuel_pct,           # fuel-only framing (dramatic)
+        "savings_pct_vs_2d": round(d.get("delta_pct", 0)),  # total-cost framing (honest)
+        "twod_cost_usd": round(t2.get("cost", 0)),
+        "fourd_cost_usd": round(t4.get("cost", 0)),
+        "by_maneuver": by,
+        "flights": flights,
+    }
 
 
 def _synthetic_fleet(asked_at: str) -> dict:
@@ -211,14 +285,20 @@ def render(data: dict, is_dry_run: bool) -> str:
              f"({_g(t,'turb_min_avoided')} min of moderate-or-worse chop avoided).")
     L.append("")
 
-    # 4D vs 2D callout — the headline insight
+    # 4D vs 2D callout — the headline insight (fuel framing + honest cost framing)
     two_d = _g(data, "twod_fuel_gal")
     four_d = _g(data, "fourd_fuel_gal")
-    pct = _g(data, "savings_pct_vs_2d")
-    L.append(f"> **4D beats 2D by {pct}%.** A lateral-only (2D) system would burn ~**{two_d:,} gal** "
-             f"rerouting every flight *around* the storm. Using the full 4D field — climb over, "
-             f"wait it out, or deviate — costs ~**{four_d:,} gal**. Time is the cheap escape route "
-             f"that 2D tools can't see.")
+    fuel_pct = data.get("fuel_savings_pct", data.get("savings_pct_vs_2d", "—"))
+    cost_pct = _g(data, "savings_pct_vs_2d")
+    L.append(f"> **4D cuts avoidance fuel ~{fuel_pct}%.** A lateral-only (2D) system reroutes every "
+             f"flight *around* the storm — ~**{two_d:,} gal**. The full 4D field (climb over, wait it "
+             f"out, or deviate) costs ~**{four_d:,} gal**.")
+    if isinstance(cost_pct, (int, float)) and data.get("twod_cost_usd"):
+        L.append(f">")
+        L.append(f"> Net of the added delay (fuel saved is partly traded for holding time), that's "
+                 f"**~{cost_pct}% lower total cost** "
+                 f"(${data.get('fourd_cost_usd'):,} vs ${data.get('twod_cost_usd'):,}). "
+                 f"Time is the cheap escape route 2D tools can't see.")
     L.append("")
 
     # Per-maneuver breakdown
@@ -235,12 +315,17 @@ def render(data: dict, is_dry_run: bool) -> str:
 
     # Per-flight detail
     L.append("## Per-flight detail")
-    L.append("| Flight | Type | ETA | Maneuver | Δfuel | Δtime | Chop avoided | Pax |")
-    L.append("|---|---|---:|---|---:|---:|---:|---:|")
-    for f in data.get("flights", []) or []:
-        L.append(f"| {_g(f,'callsign')} | {_g(f,'actype')} | {_g(f,'eta_min')} min | "
+    all_flights = data.get("flights", []) or []
+    CAP = 15
+    L.append(f"_Top {min(CAP, len(all_flights))} of {len(all_flights)} by turbulence avoided._")
+    L.append("| Flight | Type | Maneuver | Δfuel | Δtime | Chop avoided | Pax |")
+    L.append("|---|---|---|---:|---:|---:|---:|")
+    for f in all_flights[:CAP]:
+        L.append(f"| {_g(f,'callsign')} | {_g(f,'actype')} | "
                  f"{_glyph(f.get('maneuver'))} | {_g(f,'fuel_gal')} gal | {_g(f,'delay_min')} min | "
                  f"{_g(f,'turb_min_avoided')} min | {_g(f,'pax')} |")
+    if len(all_flights) > CAP:
+        L.append(f"| _…and {len(all_flights) - CAP} more_ | | | | | | |")
     L.append("")
 
     # Insights
