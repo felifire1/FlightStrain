@@ -31,3 +31,4 @@ __pycache__/
 
 # OS
 .DS_Store
+data/reports/
