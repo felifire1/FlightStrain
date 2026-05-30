@@ -1,0 +1,896 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>ASI Hack — 4D Airspace</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Inter:wght@400;500;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cesium.com/downloads/cesiumjs/releases/1.121/Build/Cesium/Widgets/widgets.css">
+  <script src="https://cesium.com/downloads/cesiumjs/releases/1.121/Build/Cesium/Cesium.js"></script>
+  <!-- gitignored; create from config.example.js with your Ion token -->
+  <script src="config.js"></script>
+  <style>
+    :root {
+      --bg: #0a0d10;
+      --panel: rgba(14, 18, 22, 0.82);
+      --border: #2a3138;
+      --text: #e6ebef;
+      --dim: #8a929b;
+      --accent: #ff7a18;
+      --accent-dim: rgba(255, 122, 24, 0.35);
+    }
+    html, body, #cesiumContainer {
+      width: 100%; height: 100%; margin: 0; padding: 0; overflow: hidden;
+      background: var(--bg); color: var(--text);
+      font-family: "Inter", system-ui, -apple-system, sans-serif;
+    }
+    #hud {
+      position: absolute; top: 16px; left: 16px; z-index: 10;
+      background: var(--panel);
+      backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+      border: 1px solid var(--border); border-radius: 4px;
+      padding: 14px 16px; min-width: 280px; max-width: 360px;
+      font-family: "JetBrains Mono", ui-monospace, Menlo, monospace;
+      font-size: 12px; letter-spacing: 0.02em;
+    }
+    #hud .brand {
+      font-size: 10px; color: var(--accent); letter-spacing: 0.2em;
+      text-transform: uppercase; margin-bottom: 8px;
+    }
+    #hud h1 { font-size: 14px; font-weight: 600; margin: 0 0 14px; color: #fff;
+              font-family: "Inter", sans-serif; letter-spacing: -0.01em; }
+    #hud .row {
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 4px 0; border-bottom: 1px dotted var(--border);
+    }
+    #hud .row:last-of-type { border-bottom: none; }
+    #hud .row .k { color: var(--dim); }
+    #hud .row .v { color: var(--text); font-weight: 500; }
+    #hud .row .v.ok { color: #6ee7a0; }
+    #hud .row .v.err { color: #ff6b6b; }
+    #hud .buttons {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 12px;
+    }
+    #hud button {
+      background: transparent; color: var(--text);
+      border: 1px solid var(--border); border-radius: 2px;
+      padding: 7px 8px; cursor: pointer; font: inherit;
+      transition: background 120ms, border-color 120ms;
+    }
+    #hud button:hover { background: rgba(255,122,24,0.08); border-color: var(--accent-dim); }
+    #hud button.active { background: var(--accent-dim); border-color: var(--accent); color: #fff; }
+    #legend { margin-top: 12px; padding-top: 10px; border-top: 1px dotted var(--border); }
+    #legend .legend-title { font-size: 10px; color: var(--dim); letter-spacing: 0.2em; margin-bottom: 6px; }
+    #legend .legend-row { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--text); padding: 2px 0; }
+    #legend .sw { width: 14px; height: 4px; border-radius: 1px; display: inline-block; }
+    #speed-row { margin-top: 10px; padding-top: 8px; border-top: 1px dotted var(--border); display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+    #speed-row .speed-label { font-size: 10px; color: var(--dim); letter-spacing: 0.2em; margin: 0 6px 0 4px; }
+    #speed-row button.speed { padding: 3px 6px; font-size: 11px; }
+    #speed-row button.play { padding: 3px 8px; font-size: 11px; min-width: 28px; }
+    /* tighter infoBox theme */
+    .cesium-infoBox { background: var(--panel) !important; border: 1px solid var(--border) !important; }
+    .cesium-infoBox-iframe { background: transparent !important; }
+
+    /* Cesium chrome restyle */
+    .cesium-viewer-bottom { display: none; }
+    .cesium-viewer-timelineContainer {
+      background: rgba(10,13,16,0.85) !important;
+      border-top: 1px solid var(--border) !important;
+      height: 28px !important;
+      bottom: 0 !important; left: 0 !important; right: 0 !important;
+    }
+    .cesium-timeline-bar {
+      background: transparent !important;
+      color: var(--text) !important;
+      font-family: "JetBrains Mono", ui-monospace, monospace !important;
+      font-size: 10px !important;
+    }
+    .cesium-timeline-trackContainer,
+    .cesium-timeline-icon16 { background: transparent !important; }
+    .cesium-timeline-ruler { color: var(--dim) !important; font-size: 10px !important; }
+    .cesium-timeline-needle { background: var(--accent) !important; }
+    .cesium-timeline-trackBlock { fill: var(--accent) !important; }
+
+    /* ---------------- Chat panel ---------------- */
+    #chat {
+      position: absolute; right: 16px; bottom: 44px; z-index: 12;
+      width: 420px; max-height: 60vh; display: flex; flex-direction: column;
+      background: var(--panel);
+      backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+      border: 1px solid var(--border); border-radius: 4px;
+      font-family: "JetBrains Mono", ui-monospace, Menlo, monospace;
+      font-size: 12px; color: var(--text);
+      box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+    }
+    #chat-head {
+      padding: 10px 14px; border-bottom: 1px solid var(--border);
+      display: flex; justify-content: space-between; align-items: center;
+    }
+    #chat-head .brand {
+      font-size: 10px; color: var(--accent); letter-spacing: 0.2em;
+      text-transform: uppercase;
+    }
+    #chat-head .ctrl {
+      color: var(--dim); cursor: pointer; font-size: 11px;
+      background: transparent; border: 1px solid var(--border);
+      padding: 2px 7px; border-radius: 2px;
+    }
+    #chat-head .ctrl:hover { color: var(--accent); border-color: var(--accent-dim); }
+    #chat-log {
+      flex: 1; overflow-y: auto; padding: 12px 14px;
+      display: flex; flex-direction: column; gap: 10px;
+      scrollbar-width: thin; scrollbar-color: var(--border) transparent;
+    }
+    #chat-log::-webkit-scrollbar { width: 6px; }
+    #chat-log::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+    .msg { line-height: 1.45; }
+    .msg .who {
+      font-size: 9px; letter-spacing: 0.2em; color: var(--dim);
+      text-transform: uppercase; margin-bottom: 3px;
+    }
+    .msg.user .who { color: var(--accent); }
+    .msg .body { color: var(--text); white-space: pre-wrap; word-wrap: break-word; }
+    .msg.user .body { color: #e6ebef; }
+    .msg.thinking .body { color: var(--dim); font-style: italic; }
+    .msg .tools {
+      margin-top: 6px; font-size: 10px; color: var(--dim);
+      letter-spacing: 0.02em;
+    }
+    .msg .tools .tool {
+      display: inline-block; padding: 1px 6px; margin: 2px 4px 2px 0;
+      border: 1px solid var(--border); border-radius: 2px; background: rgba(255,255,255,0.02);
+    }
+    #chat-form {
+      display: flex; gap: 6px; padding: 10px;
+      border-top: 1px solid var(--border);
+    }
+    #chat-input {
+      flex: 1; background: rgba(255,255,255,0.04);
+      border: 1px solid var(--border); border-radius: 2px;
+      color: var(--text); font: inherit; padding: 8px 10px;
+      outline: none;
+    }
+    #chat-input:focus { border-color: var(--accent-dim); }
+    #chat-send {
+      background: var(--accent-dim); border: 1px solid var(--accent);
+      color: #fff; padding: 8px 14px; border-radius: 2px;
+      cursor: pointer; font: inherit;
+    }
+    #chat-send:disabled { opacity: 0.4; cursor: default; }
+    #chat-collapsed {
+      position: absolute; right: 16px; bottom: 44px; z-index: 12;
+      background: var(--panel); border: 1px solid var(--border); border-radius: 4px;
+      color: var(--accent); padding: 8px 14px; cursor: pointer;
+      font: 11px "JetBrains Mono", monospace; letter-spacing: 0.2em;
+      text-transform: uppercase; display: none;
+    }
+  </style>
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+
+  <div id="hud">
+    <div class="brand">› 4D AIRSPACE</div>
+    <h1>NAS Digital Twin</h1>
+    <div class="row"><span class="k">Traffic</span><span class="v" id="traffic-status">—</span></div>
+    <div class="row"><span class="k">Turbulence</span><span class="v" id="turb-status">—</span></div>
+    <div class="row"><span class="k">Storms</span><span class="v" id="sigmet-status">—</span></div>
+    <div class="row"><span class="k">PIREPs</span><span class="v" id="pirep-status">—</span></div>
+    <div class="row"><span class="k">Winds</span><span class="v" id="wind-status">—</span></div>
+    <div class="row"><span class="k">Airports</span><span class="v" id="apt-status">—</span></div>
+    <div class="row"><span class="k">Radar</span><span class="v" id="radar-status">off</span></div>
+    <div class="row"><span class="k">Decisions</span><span class="v" id="decisions-status">—</span></div>
+    <div class="row"><span class="k">Hover</span><span class="v" id="hover-status">—</span></div>
+    <div class="row"><span class="k">Tracking</span><span class="v" id="track-status">—</span></div>
+    <div class="row"><span class="k">Clock (EDT)</span><span class="v" id="clock-edt">—</span></div>
+    <div class="row"><span class="k">Clock (UTC)</span><span class="v" id="clock-status">—</span></div>
+    <div class="buttons">
+      <button id="load-traffic">Traffic</button>
+      <button id="load-turb">Turbulence</button>
+      <button id="load-sigmet">⛈ Storms</button>
+      <button id="load-pirep">⌖ PIREPs</button>
+      <button id="load-wind">↗ Winds</button>
+      <button id="load-apt">Airports</button>
+      <button id="toggle-radar">Radar</button>
+      <button id="load-decisions">⚠ Decisions</button>
+      <button id="zoom-bos">→ BOS</button>
+      <button id="zoom-conus">→ CONUS</button>
+      <button id="toggle-buildings">Buildings</button>
+    </div>
+    <div id="speed-row">
+      <button id="play-toggle" class="play">▶</button>
+      <span class="speed-label">SPEED</span>
+      <button class="speed" data-mult="1">1×</button>
+      <button class="speed active" data-mult="10">10×</button>
+      <button class="speed" data-mult="30">30×</button>
+      <button class="speed" data-mult="100">100×</button>
+      <button class="speed" data-mult="600">600×</button>
+    </div>
+    <div id="legend">
+      <div class="legend-title">ALTITUDE</div>
+      <div class="legend-row"><span class="sw" style="background:#50c878"></span><span>SFC – 5,000 ft</span></div>
+      <div class="legend-row"><span class="sw" style="background:#fac83c"></span><span>5,000 – 15,000 ft</span></div>
+      <div class="legend-row"><span class="sw" style="background:#ff8228"></span><span>15,000 – 30,000 ft</span></div>
+      <div class="legend-row"><span class="sw" style="background:#eb3c8c"></span><span>30,000 – 40,000 ft</span></div>
+      <div class="legend-row"><span class="sw" style="background:#50c8e6"></span><span>40,000 ft +</span></div>
+    </div>
+  </div>
+
+  <div id="chat">
+    <div id="chat-head">
+      <span class="brand">› dispatcher copilot</span>
+      <button class="ctrl" id="chat-min">—</button>
+    </div>
+    <div id="chat-log"></div>
+    <form id="chat-form" autocomplete="off">
+      <input id="chat-input" placeholder="ask… 'worst chop tonight', 'show me N920PD', …" />
+      <button id="chat-send" type="submit">→</button>
+    </form>
+  </div>
+  <button id="chat-collapsed">› chat</button>
+
+  <script>
+    // Cesium Ion token loaded from frontend/config.js (gitignored).
+    // Without it: flat Carto basemap only. With it: World Terrain + OSM Buildings.
+    if (window.CESIUM_TOKEN) Cesium.Ion.defaultAccessToken = window.CESIUM_TOKEN;
+
+    // Carto Dark Matter — free, no-auth, monochrome dark basemap
+    const cartoDark = new Cesium.UrlTemplateImageryProvider({
+      url: "https://{s}.basemaps.cartocdn.com/dark_nolabels/{z}/{x}/{y}{scale}.png",
+      subdomains: ["a", "b", "c", "d"],
+      credit: "© CARTO © OpenStreetMap",
+    });
+
+    const viewer = new Cesium.Viewer("cesiumContainer", {
+      animation: false,           // hide the dial, we have HUD controls instead
+      timeline: true,
+      automaticallyTrackDataSourceClocks: false,  // we control the clock, not loaded CZMLs
+
+      baseLayerPicker: false,
+      geocoder: false,
+      homeButton: false,
+      sceneModePicker: false,
+      navigationHelpButton: false,
+      fullscreenButton: false,
+      infoBox: true,
+      selectionIndicator: true,
+      shouldAnimate: true,
+      baseLayer: new Cesium.ImageryLayer(cartoDark),
+      // Start with ellipsoid — World Terrain only swaps in on BOS zoom.
+    });
+
+    // Lazy terrain: swap in real terrain when zoomed into a metro, swap out
+    // for CONUS so we don't drag the continent's tile pyramid across the wire.
+    let realTerrainLoaded = false;
+    async function useRealTerrain() {
+      if (realTerrainLoaded || !window.CESIUM_TOKEN) return;
+      try {
+        viewer.scene.setTerrain(Cesium.Terrain.fromWorldTerrain());
+        realTerrainLoaded = true;
+      } catch (e) { console.warn("terrain load:", e); }
+    }
+    function useFlatTerrain() {
+      if (!realTerrainLoaded) return;
+      viewer.scene.terrainProvider = new Cesium.EllipsoidTerrainProvider();
+      realTerrainLoaded = false;
+    }
+
+    // Perf: tolerate coarser terrain tiles when zoomed out (default 2 is too detailed
+    // for a continental view). 8 makes pans snappy at the cost of distant sharpness.
+    viewer.scene.globe.maximumScreenSpaceError = 8;
+    viewer.scene.globe.tileCacheSize = 1000;
+    // Don't request high-res imagery when terrain isn't loaded yet
+    viewer.scene.globe.preloadAncestors = false;
+    viewer.scene.globe.preloadSiblings = false;
+
+    // 3D OSM Buildings — Ion asset 96188. Heavy globally; only mount on demand
+    // via a toggle, not on page load.
+    let buildings = null;
+    async function toggleBuildings(btn) {
+      if (buildings) {
+        viewer.scene.primitives.remove(buildings); buildings = null;
+        btn.classList.remove("active");
+        return;
+      }
+      if (!window.CESIUM_TOKEN) return;
+      buildings = await Cesium.createOsmBuildingsAsync();
+      viewer.scene.primitives.add(buildings);
+      btn.classList.add("active");
+    }
+
+    // Scene appearance — flat dark digital-twin feel
+    viewer.scene.skyAtmosphere.show = false;
+    viewer.scene.skyBox.show = false;
+    viewer.scene.backgroundColor = Cesium.Color.fromCssColorString("#0a0d10");
+    viewer.scene.globe.baseColor = Cesium.Color.fromCssColorString("#0a0d10");
+    viewer.scene.globe.showGroundAtmosphere = false;
+    viewer.scene.fog.enabled = false;
+    viewer.scene.globe.enableLighting = false;
+    viewer.scene.contextOptions = { webgl: { alpha: true } };
+
+    // NWS radar overlay (free, no auth). MRMS base reflectivity tiles.
+    const radarProvider = new Cesium.UrlTemplateImageryProvider({
+      url: "https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/nexrad-n0r-900913/{z}/{x}/{y}.png",
+      maximumLevel: 8,
+      credit: "Iowa State / NWS",
+    });
+    let radarLayer = null;
+
+    const span = { start: null, stop: null };
+    function widenSpan(start, stop) {
+      if (!span.start || Cesium.JulianDate.lessThan(start, span.start)) span.start = start.clone();
+      if (!span.stop  || Cesium.JulianDate.greaterThan(stop, span.stop))  span.stop  = stop.clone();
+      viewer.clock.startTime = span.start.clone();
+      viewer.clock.stopTime  = span.stop.clone();
+      if (Cesium.JulianDate.lessThan(viewer.clock.currentTime, span.start) ||
+          Cesium.JulianDate.greaterThan(viewer.clock.currentTime, span.stop)) {
+        viewer.clock.currentTime = span.start.clone();
+      }
+      viewer.timeline.zoomTo(span.start, span.stop);
+    }
+
+    function setStatus(id, text, cls = "v") {
+      const el = document.getElementById(id);
+      el.innerText = text;
+      el.className = cls;
+    }
+
+    // Track loaded datasources by key so buttons can toggle them off.
+    const loaded = {}; // key -> CzmlDataSource
+
+    // Only datasets in this set drive the master timeline. Everything else (turbulence
+    // forecasts, airports, etc.) just rides whatever time the user is at; their own
+    // availability windows handle when entities are visible.
+    const TIMELINE_DRIVERS = new Set(["traffic", "decisions"]);
+
+    async function toggleCzml(key, url, statusId, btn) {
+      if (loaded[key]) {
+        viewer.dataSources.remove(loaded[key], true);
+        delete loaded[key];
+        setStatus(statusId, "off", "v");
+        btn.classList.remove("active");
+        return null;
+      }
+      try {
+        const ds = await Cesium.CzmlDataSource.load(url);
+        viewer.dataSources.add(ds);
+        loaded[key] = ds;
+        viewer.clock.shouldAnimate = true;
+        setStatus(statusId, `${ds.entities.values.length} entities`, "v ok");
+        if (ds.clock && TIMELINE_DRIVERS.has(key)) {
+          widenSpan(ds.clock.startTime, ds.clock.stopTime);
+          if (ds.clock.multiplier) viewer.clock.multiplier = ds.clock.multiplier;
+          // Jump clock to (stop - 1h) so the user lands near the freshest data,
+          // not 8 hours ago. If the dataset is shorter than 1h, fall back to start.
+          const oneHourBack = Cesium.JulianDate.addSeconds(
+            ds.clock.stopTime, -3600, new Cesium.JulianDate()
+          );
+          const start = ds.clock.startTime;
+          const target = Cesium.JulianDate.greaterThan(oneHourBack, start) ? oneHourBack : start;
+          viewer.clock.currentTime = target.clone();
+        }
+        btn.classList.add("active");
+        return ds;
+      } catch (e) {
+        setStatus(statusId, "error", "v err");
+        console.error(url, e);
+      }
+    }
+
+    // Live clock readout — show both UTC and Eastern (DST-aware via Intl)
+    const EDT_FMT = new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/New_York", hour: "2-digit", minute: "2-digit",
+      second: "2-digit", hour12: false, timeZoneName: "short",
+    });
+    viewer.clock.onTick.addEventListener((clock) => {
+      const utcIso = Cesium.JulianDate.toIso8601(clock.currentTime, 0);
+      document.getElementById("clock-status").innerText = utcIso.slice(11, 19) + "Z";
+      // JulianDate -> JS Date is via the convertible field; safer to round-trip via toIso8601
+      const jsDate = Cesium.JulianDate.toDate(clock.currentTime);
+      document.getElementById("clock-edt").innerText = EDT_FMT.format(jsDate);
+    });
+
+    // Buttons (every one is a toggle)
+    document.getElementById("load-traffic").onclick = (e) =>
+      toggleCzml("traffic", "../data/samples/traffic.czml", "traffic-status", e.target);
+    document.getElementById("load-turb").onclick = (e) =>
+      toggleCzml("turb", "../data/samples/gairmet.czml", "turb-status", e.target);
+    document.getElementById("load-sigmet").onclick = (e) =>
+      toggleCzml("sigmet", "../data/samples/sigmets.czml", "sigmet-status", e.target);
+    document.getElementById("load-pirep").onclick = (e) =>
+      toggleCzml("pirep", "../data/samples/pireps.czml", "pirep-status", e.target);
+    document.getElementById("load-wind").onclick = (e) =>
+      toggleCzml("wind", "../data/samples/winds.czml", "wind-status", e.target);
+    document.getElementById("load-apt").onclick = (e) =>
+      toggleCzml("apt", "../data/samples/airports.czml", "apt-status", e.target);
+    document.getElementById("load-decisions").onclick = (e) =>
+      toggleCzml("decisions", "../data/samples/decisions.czml", "decisions-status", e.target);
+
+    document.getElementById("toggle-radar").onclick = (e) => {
+      if (radarLayer) {
+        viewer.imageryLayers.remove(radarLayer); radarLayer = null;
+        setStatus("radar-status", "off", "v");
+        e.target.classList.remove("active");
+      } else {
+        radarLayer = viewer.imageryLayers.addImageryProvider(radarProvider);
+        radarLayer.alpha = 0.7;
+        setStatus("radar-status", "live nexrad", "v ok");
+        e.target.classList.add("active");
+      }
+    };
+
+    // Fly the camera so it actually *looks at* a target. We sit the camera south
+    // of the target at the right offset for the requested pitch so the target
+    // ends up centered on screen.
+    function flyLookAt(targetLon, targetLat, altMeters, pitchDeg = -45, headingDeg = 0) {
+      const pitch = Cesium.Math.toRadians(pitchDeg);
+      // ground distance from camera to target: alt / tan(|pitch|)
+      const groundMeters = altMeters / Math.tan(-pitch);
+      // lat degrees per meter ~ 1 / 111_320
+      const camLat = targetLat - groundMeters / 111_320;
+      viewer.camera.flyTo({
+        destination: Cesium.Cartesian3.fromDegrees(targetLon, camLat, altMeters),
+        orientation: {
+          heading: Cesium.Math.toRadians(headingDeg),
+          pitch,
+          roll: 0,
+        },
+        duration: 1.2,
+      });
+    }
+
+    document.getElementById("zoom-bos").onclick = () => {
+      useRealTerrain();
+      flyLookAt(-71.0, 42.4, 180_000, -50);
+    };
+    document.getElementById("zoom-conus").onclick = () => {
+      useFlatTerrain();
+      flyLookAt(-95.0, 39.0, 3_500_000, -60);
+    };
+    document.getElementById("toggle-buildings").onclick = (e) => toggleBuildings(e.target);
+
+    // ---- Airline ICAO callsign prefix lookup ----------------------------------
+    // Map 3-letter ICAO operator prefix -> friendly name. Used to humanize labels
+    // like "AAL1767" -> "American 1767". Cover the busiest US + international ops.
+    const AIRLINES = {
+      AAL: "American", DAL: "Delta", UAL: "United", JBU: "JetBlue",
+      SWA: "Southwest", ASA: "Alaska", FFT: "Frontier", NKS: "Spirit",
+      SKW: "SkyWest", ENY: "Envoy", RPA: "Republic", EDV: "Endeavor",
+      PDT: "Piedmont", JIA: "PSA", QXE: "Horizon", ACA: "Air Canada",
+      WJA: "WestJet", BAW: "British Airways", AFR: "Air France",
+      DLH: "Lufthansa", KLM: "KLM", IBE: "Iberia", AZA: "ITA",
+      SAS: "Scandinavian", VIR: "Virgin Atlantic", AAR: "Asiana",
+      KAL: "Korean Air", JAL: "Japan Airlines", ANA: "All Nippon",
+      CPA: "Cathay Pacific", SIA: "Singapore", QFA: "Qantas",
+      UAE: "Emirates", QTR: "Qatar", ETD: "Etihad", AMX: "Aeromexico",
+      VOI: "Volaris", FDX: "FedEx", UPS: "UPS", GTI: "Atlas Air",
+      ABX: "ABX Air", ATN: "Air Transport Intl", NCA: "Nippon Cargo",
+      CLX: "Cargolux", CAL: "China Airlines", CES: "China Eastern",
+      CSN: "China Southern",
+    };
+
+    function prettyCallsign(callsign) {
+      if (!callsign) return "—";
+      const cs = callsign.trim().toUpperCase();
+      const prefix = cs.slice(0, 3);
+      const tail = cs.slice(3).replace(/^0+/, "") || cs;
+      const name = AIRLINES[prefix];
+      return name ? `${name} ${tail}` : cs;
+    }
+
+    // ---- Picker: hover + click + tracking ------------------------------------
+    let hoveredEntity = null;
+    let trackedEntity = null;
+    const handler = new Cesium.ScreenSpaceEventHandler(viewer.scene.canvas);
+
+    function isAircraftEntity(e) {
+      // OpenSky icao24 is 6 hex chars; airports are "ap-XXXX"; turb is "turb-N"
+      return e && typeof e.id === "string" && /^[0-9a-f]{6}$/.test(e.id);
+    }
+
+    function setHovered(entity) {
+      if (hoveredEntity === entity) return;
+      // un-show old hovered label (unless it's the tracked one)
+      if (hoveredEntity && hoveredEntity !== trackedEntity && hoveredEntity.label) {
+        hoveredEntity.label.show = new Cesium.ConstantProperty(false);
+      }
+      hoveredEntity = entity;
+      if (entity) {
+        if (entity.label) entity.label.show = new Cesium.ConstantProperty(true);
+        const props = entity.properties || {};
+        const cs = props.callsign ? props.callsign.getValue() : entity.name;
+        document.getElementById("hover-status").innerText = prettyCallsign(cs);
+        viewer.scene.canvas.style.cursor = "pointer";
+      } else {
+        document.getElementById("hover-status").innerText = "—";
+        viewer.scene.canvas.style.cursor = "default";
+      }
+    }
+
+    function describeAircraft(entity, time) {
+      const props = entity.properties || {};
+      const cs = props.callsign ? props.callsign.getValue() : entity.name;
+      const country = props.origin_country ? props.origin_country.getValue() : "";
+      const pretty = prettyCallsign(cs);
+
+      let altFt = "—", spdKt = "—", hdg = "—", latStr = "—", lonStr = "—";
+      try {
+        const pos = entity.position.getValue(time);
+        if (pos) {
+          const carto = Cesium.Cartographic.fromCartesian(pos);
+          altFt = Math.round(carto.height * 3.28084).toLocaleString();
+          latStr = Cesium.Math.toDegrees(carto.latitude).toFixed(3);
+          lonStr = Cesium.Math.toDegrees(carto.longitude).toFixed(3);
+        }
+        // estimate ground speed from finite difference
+        const dt = 5;
+        const p1 = entity.position.getValue(time);
+        const p2 = entity.position.getValue(Cesium.JulianDate.addSeconds(time, dt, new Cesium.JulianDate()));
+        if (p1 && p2) {
+          const d = Cesium.Cartesian3.distance(p1, p2);
+          spdKt = Math.round((d / dt) * 1.94384);
+          // heading: bearing from p1 to p2
+          const c1 = Cesium.Cartographic.fromCartesian(p1);
+          const c2 = Cesium.Cartographic.fromCartesian(p2);
+          const dLon = c2.longitude - c1.longitude;
+          const y = Math.sin(dLon) * Math.cos(c2.latitude);
+          const x = Math.cos(c1.latitude) * Math.sin(c2.latitude) -
+                    Math.sin(c1.latitude) * Math.cos(c2.latitude) * Math.cos(dLon);
+          let brng = (Cesium.Math.toDegrees(Math.atan2(y, x)) + 360) % 360;
+          hdg = `${Math.round(brng)}°`;
+        }
+      } catch (e) { /* sampling beyond availability */ }
+
+      return `
+        <div style="font: 12px ui-monospace,Menlo,monospace; color: #e6ebef; padding: 4px;">
+          <div style="font-size: 11px; color: #8a929b; letter-spacing: 0.15em; text-transform: uppercase;">› flight</div>
+          <h2 style="margin: 4px 0 10px; font: 600 16px 'Inter',sans-serif; color: #fff;">${pretty}</h2>
+          <table style="width: 100%; border-collapse: collapse;">
+            <tr><td style="color: #8a929b; padding: 3px 8px 3px 0;">Callsign</td><td>${cs}</td></tr>
+            <tr><td style="color: #8a929b; padding: 3px 8px 3px 0;">Altitude</td><td>${altFt} ft</td></tr>
+            <tr><td style="color: #8a929b; padding: 3px 8px 3px 0;">Ground speed</td><td>${spdKt} kt</td></tr>
+            <tr><td style="color: #8a929b; padding: 3px 8px 3px 0;">Heading</td><td>${hdg}</td></tr>
+            <tr><td style="color: #8a929b; padding: 3px 8px 3px 0;">Position</td><td>${latStr}, ${lonStr}</td></tr>
+            <tr><td style="color: #8a929b; padding: 3px 8px 3px 0;">Origin</td><td>${country || "—"}</td></tr>
+            <tr><td style="color: #8a929b; padding: 3px 8px 3px 0;">ICAO24</td><td>${entity.id}</td></tr>
+          </table>
+          <div style="margin-top: 10px; font-size: 11px; color: #8a929b;">
+            Press <b>Esc</b> to release camera tracking.
+          </div>
+        </div>`;
+    }
+
+    function attachDynamicDescriptions(ds) {
+      // Walk every aircraft entity in this datasource and attach a CallbackProperty
+      // description so the InfoBox updates as the clock advances.
+      ds.entities.values.forEach((entity) => {
+        if (!isAircraftEntity(entity)) return;
+        entity.description = new Cesium.CallbackProperty(
+          (time) => describeAircraft(entity, time), false
+        );
+      });
+    }
+
+    handler.setInputAction((m) => {
+      const picked = viewer.scene.pick(m.endPosition);
+      const e = picked && picked.id;
+      setHovered(isAircraftEntity(e) ? e : null);
+    }, Cesium.ScreenSpaceEventType.MOUSE_MOVE);
+
+    handler.setInputAction((m) => {
+      const picked = viewer.scene.pick(m.position);
+      const e = picked && picked.id;
+      if (isAircraftEntity(e)) {
+        trackedEntity = e;
+        viewer.trackedEntity = e;
+        if (e.label) e.label.show = new Cesium.ConstantProperty(true);
+        const cs = e.properties?.callsign?.getValue() || e.name;
+        document.getElementById("track-status").innerText = prettyCallsign(cs);
+      } else {
+        // Clicking turbulence polygons or airports shouldn't grab the camera or
+        // pop an empty info box. Suppress selection entirely.
+        viewer.selectedEntity = undefined;
+      }
+    }, Cesium.ScreenSpaceEventType.LEFT_CLICK);
+
+    document.addEventListener("keydown", (ev) => {
+      if (ev.key === "Escape" && trackedEntity) {
+        if (trackedEntity.label) trackedEntity.label.show = new Cesium.ConstantProperty(false);
+        viewer.trackedEntity = undefined;
+        trackedEntity = null;
+        document.getElementById("track-status").innerText = "—";
+      }
+    });
+
+    // Play/pause
+    const playBtn = document.getElementById("play-toggle");
+    function updatePlayBtn() {
+      playBtn.innerText = viewer.clock.shouldAnimate ? "❚❚" : "▶";
+      playBtn.classList.toggle("active", viewer.clock.shouldAnimate);
+    }
+    playBtn.onclick = () => {
+      viewer.clock.shouldAnimate = !viewer.clock.shouldAnimate;
+      updatePlayBtn();
+    };
+    updatePlayBtn();
+
+    // Speed presets
+    document.querySelectorAll("#speed-row button.speed").forEach((b) => {
+      b.onclick = () => {
+        const m = Number(b.dataset.mult);
+        viewer.clock.multiplier = m;
+        viewer.clock.shouldAnimate = true;
+        document.querySelectorAll("#speed-row button.speed").forEach((x) => x.classList.remove("active"));
+        b.classList.add("active");
+      };
+    });
+
+    // Wire dynamic descriptions on whatever traffic dataset gets loaded
+    const _origToggleCzml = toggleCzml;
+    toggleCzml = async function(key, url, statusId, btn) {
+      const ds = await _origToggleCzml(key, url, statusId, btn);
+      if (ds && key === "traffic") attachDynamicDescriptions(ds);
+      return ds;
+    };
+    // Rewire traffic button to the new toggleCzml
+    document.getElementById("load-traffic").onclick = (e) =>
+      toggleCzml("traffic", "../data/samples/traffic.czml", "traffic-status", e.target);
+
+    // Initial oblique camera over the US
+    flyLookAt(-95.0, 39.0, 4_000_000, -60);
+
+    // ============================================================
+    // CHAT + MAP ACTION DISPATCH
+    // ============================================================
+    // The Cesium UI talks to /api/chat (FastAPI). Each response carries a
+    // text answer plus a list of map_actions to execute against the existing
+    // viewer state — so the agent can ALSO drive the map, not just narrate.
+    // We deliberately reuse the existing primitives (toggleCzml, flyLookAt,
+    // viewer.trackedEntity, clock multiplier) rather than introducing a
+    // parallel API.
+
+    const chatLog = document.getElementById("chat-log");
+    const chatForm = document.getElementById("chat-form");
+    const chatInput = document.getElementById("chat-input");
+    const chatSend = document.getElementById("chat-send");
+    let chatHistory = [];  // server passes back; we send it next turn
+
+    function addMsg(who, body, opts = {}) {
+      const div = document.createElement("div");
+      div.className = "msg " + who + (opts.thinking ? " thinking" : "");
+      div.innerHTML = `<div class="who">${who === "user" ? "YOU" : "AI"}</div>
+                       <div class="body"></div>
+                       ${opts.tools ? `<div class="tools"></div>` : ""}`;
+      div.querySelector(".body").textContent = body;
+      chatLog.appendChild(div);
+      chatLog.scrollTop = chatLog.scrollHeight;
+      return div;
+    }
+
+    function renderTools(div, trace) {
+      const slot = div.querySelector(".tools");
+      if (!slot || !trace?.length) return;
+      slot.innerHTML = trace.map(t =>
+        `<span class="tool">${t.name}${
+          t.args && Object.keys(t.args).length
+            ? `(${Object.entries(t.args).map(([k,v]) => `${k}=${typeof v === "string" ? v.slice(0,40) : v}`).join(", ").slice(0,80)})`
+            : "()"
+        }</span>`
+      ).join("");
+    }
+
+    // Map action dispatcher. Each action is a small command — fly camera,
+    // highlight a flight, load a layer, set timeline. We map them onto the
+    // primitives that already exist above.
+    const LAYER_BTN = {
+      traffic:    { id: "load-traffic",    url: "../data/samples/traffic.czml",    status: "traffic-status" },
+      turb:       { id: "load-turb",       url: "../data/samples/gairmet.czml",    status: "turb-status" },
+      sigmet:     { id: "load-sigmet",     url: "../data/samples/sigmets.czml",    status: "sigmet-status" },
+      pirep:      { id: "load-pirep",      url: "../data/samples/pireps.czml",     status: "pirep-status" },
+      wind:       { id: "load-wind",       url: "../data/samples/winds.czml",      status: "wind-status" },
+      airports:   { id: "load-apt",        url: "../data/samples/airports.czml",   status: "apt-status" },
+      decisions:  { id: "load-decisions",  url: "../data/samples/decisions.czml",  status: "decisions-status" },
+    };
+
+    async function ensureLayerLoaded(name) {
+      const cfg = LAYER_BTN[name];
+      if (cfg) {
+        if (!loaded[name]) {
+          const btn = document.getElementById(cfg.id);
+          await toggleCzml(name, cfg.url, cfg.status, btn);
+        }
+      } else if (name === "radar") {
+        if (!radarLayer) document.getElementById("toggle-radar").click();
+      } else if (name === "buildings") {
+        if (!buildings) document.getElementById("toggle-buildings").click();
+      }
+    }
+
+    async function executeMapAction(cmd) {
+      try {
+        switch (cmd.action) {
+          case "fly_to": {
+            const alt = cmd.alt_m || 180000;
+            const pitch = cmd.pitch_deg || -50;
+            // If close zoom over a metro, kick in real terrain
+            if (alt < 500_000 && typeof useRealTerrain === "function") useRealTerrain();
+            flyLookAt(cmd.lon, cmd.lat, alt, pitch);
+            break;
+          }
+          case "highlight_flight": {
+            await ensureLayerLoaded("traffic");
+            const icao = (cmd.icao24 || "").toLowerCase();
+            // Find the entity across all loaded datasources
+            let found = null;
+            viewer.dataSources._dataSources.forEach(ds => {
+              ds.entities.values.forEach(e => {
+                if (e.id === icao || e.id === `decision-${icao}`) found = e;
+              });
+            });
+            if (found) {
+              viewer.trackedEntity = found;
+              if (found.label) found.label.show = new Cesium.ConstantProperty(true);
+              document.getElementById("track-status").innerText = found.name || icao;
+            } else {
+              console.warn("highlight: no entity for", icao);
+            }
+            break;
+          }
+          case "load_layer":
+            await ensureLayerLoaded(cmd.layer);
+            break;
+          case "set_time": {
+            const jd = Cesium.JulianDate.fromIso8601(cmd.iso_time);
+            viewer.clock.currentTime = jd;
+            break;
+          }
+          case "set_speed":
+            viewer.clock.multiplier = Number(cmd.multiplier) || 30;
+            viewer.clock.shouldAnimate = true;
+            // Reflect in the speed-row UI
+            document.querySelectorAll("#speed-row button.speed").forEach(b => {
+              b.classList.toggle("active", Number(b.dataset.mult) === viewer.clock.multiplier);
+            });
+            break;
+          case "draw_polygon": {
+            // Agent proposes a custom polygon (e.g. a reroute corridor or avoid zone).
+            // points: [[lon,lat], ...], color: "rgba(r,g,b,a)" or [r,g,b,a],
+            // height_m / extruded_m (optional), id (string), label (optional).
+            if (!window.__agentPolygons) window.__agentPolygons = new Map();
+            const id = cmd.id || `poly-${Date.now()}`;
+            const pts = cmd.points || [];
+            if (pts.length < 3) { console.warn("draw_polygon needs >=3 points"); break; }
+            // Strip prior polygon with this id (idempotent re-draw)
+            const prev = window.__agentPolygons.get(id);
+            if (prev) viewer.entities.remove(prev);
+            // Normalize color
+            let rgba = cmd.color;
+            if (Array.isArray(rgba)) rgba = `rgba(${rgba[0]},${rgba[1]},${rgba[2]},${(rgba[3]||255)/255})`;
+            if (typeof rgba !== "string") rgba = "rgba(255,122,24,0.30)";
+            const positions = pts.flat();
+            const entity = viewer.entities.add({
+              id, name: cmd.label || id,
+              polygon: {
+                hierarchy: Cesium.Cartesian3.fromDegreesArray(positions),
+                material: Cesium.Color.fromCssColorString(rgba),
+                height: cmd.height_m || 0,
+                extrudedHeight: cmd.extruded_m,
+                outline: true,
+                outlineColor: Cesium.Color.fromCssColorString(rgba.replace(/,[^,]+\)$/, ",1)")),
+              },
+            });
+            window.__agentPolygons.set(id, entity);
+            break;
+          }
+          case "clear_polygons": {
+            if (window.__agentPolygons) {
+              window.__agentPolygons.forEach(e => viewer.entities.remove(e));
+              window.__agentPolygons.clear();
+            }
+            break;
+          }
+        }
+      } catch (e) { console.error("map action failed", cmd, e); }
+    }
+
+    // Streaming chat via NDJSON. Server emits one JSON object per line; each
+    // is one of: {type:"text_delta",delta:""}, {type:"tool_use",name,args},
+    // {type:"map_action",cmd}, {type:"done",history,tool_trace},
+    // {type:"error",message}.
+    async function sendChat(message) {
+      addMsg("user", message);
+      const aiMsg = addMsg("ai", "", { thinking: true });
+      const bodyEl = aiMsg.querySelector(".body");
+      const toolsEl = document.createElement("div");
+      toolsEl.className = "tools";
+      aiMsg.appendChild(toolsEl);
+      chatSend.disabled = true; chatInput.disabled = true;
+      let textSoFar = "";
+      let toolCalls = [];
+
+      function paintTools() {
+        toolsEl.innerHTML = toolCalls.map(t =>
+          `<span class="tool">${t.name}${
+            t.args && Object.keys(t.args).length
+              ? `(${Object.entries(t.args).map(([k,v]) => `${k}=${typeof v === "string" ? v.slice(0,40) : v}`).join(", ").slice(0,80)})`
+              : "()"
+          }</span>`
+        ).join("");
+      }
+
+      try {
+        const resp = await fetch("/api/chat/stream", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ message, history: chatHistory }),
+        });
+        if (!resp.ok) throw new Error("HTTP " + resp.status);
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split("\n");
+          buffer = lines.pop();  // last partial line stays
+          for (const line of lines) {
+            if (!line.trim()) continue;
+            let ev;
+            try { ev = JSON.parse(line); } catch { continue; }
+            if (ev.type === "text_delta") {
+              if (aiMsg.classList.contains("thinking")) aiMsg.classList.remove("thinking");
+              textSoFar += ev.delta;
+              bodyEl.textContent = textSoFar;
+              chatLog.scrollTop = chatLog.scrollHeight;
+            } else if (ev.type === "tool_use") {
+              toolCalls.push({ name: ev.name, args: ev.args });
+              paintTools();
+            } else if (ev.type === "map_action") {
+              executeMapAction(ev.cmd);  // fire-and-forget; UI doesn't block
+            } else if (ev.type === "done") {
+              chatHistory = ev.history || chatHistory;
+              if (!textSoFar && aiMsg.classList.contains("thinking")) {
+                aiMsg.classList.remove("thinking");
+                bodyEl.textContent = "(no text)";
+              }
+            } else if (ev.type === "error") {
+              aiMsg.classList.remove("thinking");
+              bodyEl.textContent = "error: " + ev.message;
+            }
+          }
+        }
+      } catch (e) {
+        aiMsg.classList.remove("thinking");
+        bodyEl.textContent = "stream error: " + e.message;
+      } finally {
+        chatSend.disabled = false; chatInput.disabled = false;
+        chatInput.focus();
+      }
+    }
+
+    chatForm.addEventListener("submit", (e) => {
+      e.preventDefault();
+      const v = chatInput.value.trim();
+      if (!v) return;
+      chatInput.value = "";
+      sendChat(v);
+    });
+
+    // Collapse / expand
+    document.getElementById("chat-min").onclick = () => {
+      document.getElementById("chat").style.display = "none";
+      document.getElementById("chat-collapsed").style.display = "block";
+    };
+    document.getElementById("chat-collapsed").onclick = () => {
+      document.getElementById("chat-collapsed").style.display = "none";
+      document.getElementById("chat").style.display = "flex";
+      chatInput.focus();
+    };
+
+    // Welcome line — sets expectations
+    addMsg("ai", "Dispatcher copilot ready. Ask me anything about the NAS — I can drive the map.");
+  </script>
+</body>
+</html>

@@ -1,0 +1,393 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Specialist Dev Console</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Inter:wght@400;500;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #0a0d10;
+      --panel: rgba(14, 18, 22, 0.92);
+      --border: #2a3138;
+      --text: #e6ebef;
+      --dim: #8a929b;
+      --accent: #ff7a18;
+      --accent-dim: rgba(255, 122, 24, 0.35);
+      --weather: #5aa9ff;
+      --traffic: #50c878;
+      --safety: #ff5050;
+      --fleet: #e070d0;
+      --narrator: #5ad4e0;
+      --coordinator: #ffffff;
+    }
+    html, body { margin: 0; padding: 0; height: 100%; background: var(--bg); color: var(--text);
+                 font-family: "Inter", system-ui, sans-serif; font-size: 13px; }
+    a { color: var(--accent); text-decoration: none; }
+
+    .top {
+      padding: 14px 20px; border-bottom: 1px solid var(--border);
+      display: flex; align-items: center; gap: 18px; flex-wrap: wrap;
+    }
+    .brand { color: var(--accent); letter-spacing: 0.25em; font: 600 11px "JetBrains Mono", monospace;
+             text-transform: uppercase; }
+    .top h1 { font: 600 14px Inter, sans-serif; margin: 0; }
+    .top .sub { color: var(--dim); font-size: 11px; }
+    .top .actions { margin-left: auto; display: flex; gap: 6px; flex-wrap: wrap; }
+    .top button {
+      background: transparent; color: var(--text);
+      border: 1px solid var(--border); border-radius: 2px;
+      padding: 6px 10px; cursor: pointer;
+      font: 11px "JetBrains Mono", monospace; letter-spacing: 0.02em;
+    }
+    .top button:hover { background: rgba(255,122,24,0.08); border-color: var(--accent-dim); }
+    .top button.danger { color: #ff8080; border-color: rgba(255,80,80,0.5); }
+    .top button.danger:hover { background: rgba(255,80,80,0.1); border-color: #ff8080; }
+
+    .main { display: grid; grid-template-columns: 1fr 480px; height: calc(100vh - 56px); }
+
+    /* ---------------- Findings stream (left) ---------------- */
+    #stream {
+      padding: 16px; overflow-y: auto; border-right: 1px solid var(--border);
+      font: 12px "JetBrains Mono", ui-monospace, monospace;
+    }
+    #stream h2 { font: 600 11px Inter, sans-serif; color: var(--dim); letter-spacing: 0.2em;
+                 text-transform: uppercase; margin: 0 0 10px; }
+    .finding {
+      padding: 10px 12px; margin-bottom: 8px;
+      background: var(--panel); border: 1px solid var(--border);
+      border-left: 3px solid var(--border); border-radius: 2px;
+      animation: slideIn 200ms ease-out;
+    }
+    @keyframes slideIn { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
+    .finding .head { display: flex; gap: 10px; align-items: center; margin-bottom: 4px; }
+    .finding .spec {
+      font: 600 10px Inter, sans-serif; letter-spacing: 0.18em;
+      padding: 1px 6px; border-radius: 2px;
+    }
+    .finding .sev {
+      font-size: 10px; padding: 1px 6px; border-radius: 2px;
+      color: #000; font-weight: 600;
+    }
+    .sev-0 { background: #6c757d; color: #fff; }
+    .sev-1 { background: #5aa9ff; }
+    .sev-2 { background: #f0c040; }
+    .sev-3 { background: #ff8a3c; }
+    .sev-4 { background: #ff5050; color: #fff; }
+    .sev-5 { background: #b00020; color: #fff; box-shadow: 0 0 12px rgba(255,0,0,0.5); }
+    .finding .ts { color: var(--dim); font-size: 10px; margin-left: auto; }
+    .finding .summary { color: var(--text); line-height: 1.4; }
+    .finding .rec { color: var(--dim); margin-top: 4px; font-size: 11px; }
+    .finding .meta { color: var(--dim); margin-top: 4px; font-size: 10px; }
+    .finding.weather { border-left-color: var(--weather); }
+    .finding.weather .spec { background: rgba(90,169,255,0.2); color: var(--weather); }
+    .finding.traffic { border-left-color: var(--traffic); }
+    .finding.traffic .spec { background: rgba(80,200,120,0.2); color: var(--traffic); }
+    .finding.safety  { border-left-color: var(--safety); }
+    .finding.safety  .spec { background: rgba(255,80,80,0.2); color: var(--safety); }
+    .finding.fleet   { border-left-color: var(--fleet); }
+    .finding.fleet   .spec { background: rgba(224,112,208,0.2); color: var(--fleet); }
+    .finding.narrator{ border-left-color: var(--narrator); }
+    .finding.narrator .spec { background: rgba(90,212,224,0.2); color: var(--narrator); }
+    .finding.coordinator { border-left-color: var(--coordinator); border-color: var(--accent-dim); }
+    .finding.coordinator .spec { background: var(--accent-dim); color: #fff; }
+
+    /* ---------------- Chat (right) ---------------- */
+    #chat { display: flex; flex-direction: column; background: var(--panel); }
+    #chat-log { flex: 1; overflow-y: auto; padding: 14px;
+                display: flex; flex-direction: column; gap: 12px; }
+    .msg { line-height: 1.5; }
+    .msg .who { font: 600 10px Inter, sans-serif; letter-spacing: 0.18em;
+                color: var(--dim); margin-bottom: 4px; text-transform: uppercase; }
+    .msg.user .who { color: var(--accent); }
+    .msg .body { white-space: pre-wrap; word-wrap: break-word; font-size: 13px; }
+    .msg.user .body { color: #e6ebef; }
+    .msg .voices { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 6px; }
+    .msg .voice {
+      font: 9px "JetBrains Mono", monospace; letter-spacing: 0.1em;
+      padding: 2px 6px; border-radius: 2px; border: 1px solid var(--border);
+    }
+    .msg .map-actions { color: var(--dim); font-size: 10px; margin-top: 6px;
+                        font-family: "JetBrains Mono", monospace; }
+
+    #chat-form { display: flex; gap: 6px; padding: 10px; border-top: 1px solid var(--border); }
+    #chat-input {
+      flex: 1; background: rgba(255,255,255,0.04);
+      border: 1px solid var(--border); border-radius: 2px;
+      color: var(--text); font: inherit; padding: 9px 12px;
+      outline: none;
+    }
+    #chat-input:focus { border-color: var(--accent-dim); }
+    #chat-send {
+      background: var(--accent-dim); border: 1px solid var(--accent);
+      color: #fff; padding: 9px 16px; border-radius: 2px;
+      cursor: pointer; font: inherit;
+    }
+    #chat-send:disabled { opacity: 0.4; cursor: default; }
+
+    .empty { color: var(--dim); padding: 20px; text-align: center; font-style: italic; }
+    .pulse { animation: pulse 1.4s ease-in-out infinite; }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+  </style>
+</head>
+<body>
+  <div class="top">
+    <label class="sub" style="font-family:'JetBrains Mono',monospace; display:flex; align-items:center; gap:6px;">
+      <span style="color: var(--accent); letter-spacing: 0.2em; font-weight: 600; text-transform: uppercase;">location</span>
+      <select id="focus-select" style="
+        background: rgba(255,255,255,0.04); color: var(--text);
+        border: 1px solid var(--border); border-radius: 2px;
+        padding: 4px 8px; font: 11px 'JetBrains Mono', monospace;">
+        <option value="">— none (NE recorder) —</option>
+      </select>
+    </label>
+    <span class="brand">› SPECIALIST CONSOLE</span>
+    <h1>Multi-Agent ATC Ops Room</h1>
+    <span class="sub" id="meta-info">loading…</span>
+    <span class="sub" id="freshness-line" style="font-family: 'JetBrains Mono', monospace;"></span>
+    <div class="actions">
+      <button id="watcher-btn">▶ Start Watcher</button>
+      <button data-scenario="weather">⛅ Weather</button>
+      <button data-scenario="traffic">✈ Traffic</button>
+      <button data-scenario="all">↻ All</button>
+      <button data-scenario="correlate">🎯 Demo Correlate</button>
+      <button data-scenario="emergency" class="danger">⚠ Fire Emergency</button>
+      <button id="clear-btn">Clear</button>
+    </div>
+  </div>
+
+  <div class="main">
+    <div id="stream">
+      <h2>Live findings <span id="stream-status" class="pulse" style="font-weight:normal;text-transform:none;letter-spacing:0">· polling</span></h2>
+      <div id="stream-body">
+        <div class="empty">No findings yet. Click a scenario button above.</div>
+      </div>
+    </div>
+
+    <div id="chat">
+      <div id="chat-log"></div>
+      <form id="chat-form" autocomplete="off">
+        <input id="chat-input" placeholder="ask the coordinator… e.g. 'biggest risk right now'" autofocus />
+        <button id="chat-send" type="submit">→</button>
+      </form>
+    </div>
+  </div>
+
+  <script>
+    // ---- live findings poll ------------------------------------------------
+    let lastSeen = 0;
+    const streamBody = document.getElementById("stream-body");
+    let emptyShown = true;
+
+    function specClass(s) {
+      const root = (s || "").split(".")[0];
+      return ["weather","traffic","safety","fleet","narrator","coordinator"].includes(root) ? root : "";
+    }
+
+    function renderFinding(f) {
+      if (emptyShown) { streamBody.innerHTML = ""; emptyShown = false; }
+      const div = document.createElement("div");
+      div.className = "finding " + specClass(f.specialist);
+      const time = new Date(f.timestamp * 1000).toISOString().slice(11, 19) + "Z";
+      const meta = f.metadata && Object.keys(f.metadata).length
+        ? `<div class="meta">${Object.entries(f.metadata).slice(0,4)
+            .map(([k,v]) => `${k}=${typeof v === "object" ? JSON.stringify(v) : v}`).join(" · ")}</div>`
+        : "";
+      div.innerHTML = `
+        <div class="head">
+          <span class="spec">${f.specialist}</span>
+          <span class="sev sev-${f.severity}">S${f.severity}</span>
+          <span class="ts">${time}</span>
+        </div>
+        <div class="summary"></div>
+        ${f.recommended_action ? `<div class="rec">→ ${escapeHTML(f.recommended_action)}</div>` : ""}
+        ${meta}
+      `;
+      div.querySelector(".summary").textContent = f.summary;
+      streamBody.insertBefore(div, streamBody.firstChild);
+      // cap to ~80
+      while (streamBody.children.length > 80) streamBody.removeChild(streamBody.lastChild);
+    }
+
+    function escapeHTML(s) { return (s||"").replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])); }
+
+    async function poll() {
+      try {
+        const r = await fetch(`/api/findings?since=${lastSeen}&wait=8`);
+        const data = await r.json();
+        for (const f of data.findings) {
+          renderFinding(f);
+          if (f.timestamp > lastSeen) lastSeen = f.timestamp;
+        }
+        document.getElementById("stream-status").textContent = "· live";
+      } catch (e) {
+        document.getElementById("stream-status").textContent = "· offline";
+      } finally {
+        setTimeout(poll, 150);
+      }
+    }
+    poll();
+
+    // ---- scenarios ----------------------------------------------------------
+    document.querySelectorAll("[data-scenario]").forEach(b => {
+      b.onclick = async () => {
+        b.disabled = true;
+        try {
+          const r = await fetch("/api/scenario", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ name: b.dataset.scenario }),
+          });
+          await r.json();
+        } finally {
+          setTimeout(() => b.disabled = false, 300);
+        }
+      };
+    });
+
+    document.getElementById("clear-btn").onclick = async () => {
+      try { await fetch("/api/clear", { method: "POST" }); } catch {}
+      streamBody.innerHTML = '<div class="empty">Cleared. Fire a scenario or send a chat message.</div>';
+      emptyShown = true;
+      lastSeen = Date.now() / 1000;
+    };
+
+    // Poll freshness every 5s so the header reflects actual data age
+    async function refreshFreshness() {
+      try {
+        const r = await fetch("/api/freshness");
+        const f = await r.json();
+        const parts = Object.entries(f).map(([k, s]) =>
+          `${k}=${s < 60 ? Math.round(s)+'s' : s < 3600 ? Math.round(s/60)+'m' : Math.round(s/3600)+'h'} ago`
+        );
+        if (parts.length) {
+          document.getElementById("freshness-line").textContent = "data: " + parts.join("  ·  ");
+        }
+      } catch {}
+    }
+    refreshFreshness();
+    setInterval(refreshFreshness, 5000);
+
+    // ---- chat ---------------------------------------------------------------
+    const chatLog = document.getElementById("chat-log");
+    const chatInput = document.getElementById("chat-input");
+    const chatSend = document.getElementById("chat-send");
+    let history = [];
+
+    function addMsg(who, body, opts = {}) {
+      const div = document.createElement("div");
+      div.className = "msg " + who;
+      const head = document.createElement("div");
+      head.className = "who";
+      head.textContent = who === "user" ? "YOU" : (opts.label || "COORDINATOR");
+      const bod = document.createElement("div");
+      bod.className = "body";
+      bod.textContent = body;
+      div.appendChild(head);
+      div.appendChild(bod);
+      if (opts.voices?.length) {
+        const v = document.createElement("div");
+        v.className = "voices";
+        // dedupe voices so the chip row doesn't show the same one 5 times
+      const seen = new Set();
+      const unique = opts.voices.filter(v => {
+        const k = v.specialist + "|" + v.summary.slice(0, 40);
+        if (seen.has(k)) return false;
+        seen.add(k); return true;
+      });
+      v.innerHTML = unique.map(s =>
+          `<span class="voice ${specClass(s.specialist)}"
+                  style="border-color:var(--${specClass(s.specialist)},#2a3138);
+                         color:var(--${specClass(s.specialist)},#e6ebef)">${s.specialist} · S${s.severity}</span>`
+        ).join("");
+        div.appendChild(v);
+      }
+      if (opts.map_actions?.length) {
+        const m = document.createElement("div");
+        m.className = "map-actions";
+        m.textContent = "map_actions: " + opts.map_actions.map(a => `${a.action}(${Object.values(a).slice(1).join(",")})`).join(", ");
+        div.appendChild(m);
+      }
+      chatLog.appendChild(div);
+      chatLog.scrollTop = chatLog.scrollHeight;
+    }
+
+    document.getElementById("chat-form").onsubmit = async (e) => {
+      e.preventDefault();
+      const msg = chatInput.value.trim();
+      if (!msg) return;
+      chatInput.value = ""; chatSend.disabled = true;
+      addMsg("user", msg);
+      try {
+        const r = await fetch("/api/chat", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ message: msg, history }),
+        });
+        const data = await r.json();
+        history = data.history || history;
+        addMsg("ai", data.text || "(no text)", { voices: data.voices, map_actions: data.map_actions });
+      } catch (e) {
+        addMsg("ai", "error: " + e.message);
+      } finally {
+        chatSend.disabled = false; chatInput.focus();
+      }
+    };
+
+    // ---- meta ---------------------------------------------------------------
+    fetch("/api/specialists").then(r => r.json()).then(data => {
+      document.getElementById("meta-info").textContent =
+        `${data.specialists.length} specialists · push≥S${data.push_threshold} · mode=${data.mode}`;
+      addMsg("ai", `Constellation online. ${data.specialists.map(s => s.name).join(", ")} are watching, with ${data.coordinator.name} synthesizing. Click ▶ Start Watcher for auto-polling, or click a scenario above to fire once.`);
+    });
+
+    // ---- focus selector -----------------------------------------------------
+    const focusSelect = document.getElementById("focus-select");
+    fetch("/api/focus").then(r => r.json()).then(data => {
+      // Populate dropdown
+      const sortedKeys = data.available
+        .map(a => a.key)
+        // dedupe (some KNOWN_AREAS share coords like 'jfk'/'lga' under 'new york')
+        .filter((v, i, arr) => arr.indexOf(v) === i);
+      for (const k of sortedKeys) {
+        const opt = document.createElement("option");
+        opt.value = k; opt.textContent = k.toUpperCase();
+        focusSelect.appendChild(opt);
+      }
+      if (data.current) focusSelect.value = data.current;
+    });
+    focusSelect.onchange = async () => {
+      await fetch("/api/focus", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: focusSelect.value || "none" }),
+      });
+    };
+
+    // ---- watcher control ----------------------------------------------------
+    const watcherBtn = document.getElementById("watcher-btn");
+    let watcherRunning = false;
+
+    async function refreshWatcher() {
+      try {
+        const r = await fetch("/api/watcher/status");
+        const s = await r.json();
+        watcherRunning = s.running;
+        const since = s.seconds_since_last_tick;
+        watcherBtn.textContent = s.running
+          ? `■ Stop Watcher (${s.tick_count} ticks${since != null ? `, ${Math.round(since)}s ago` : ""})`
+          : `▶ Start Watcher`;
+        watcherBtn.classList.toggle("danger", s.running);
+      } catch {}
+    }
+    watcherBtn.onclick = async () => {
+      const endpoint = watcherRunning ? "/api/watcher/stop" : "/api/watcher/start";
+      await fetch(endpoint, { method: "POST", headers: { "content-type": "application/json" },
+                              body: JSON.stringify({ interval_sec: 30 }) });
+      refreshWatcher();
+    };
+    refreshWatcher();
+    setInterval(refreshWatcher, 3000);
+  </script>
+</body>
+</html>
