@@ -7,6 +7,11 @@ data/overnight/
 data/cache/aircraft_db.csv
 data/events/findings.jsonl
 
+# Hackathon scenario bundle — ~226MB, never commit. Lives in ~/Downloads;
+# override path via $HACKATHON_DATA_BUNDLE (see agent/scenario_routes.py).
+hackathon_data_bundle/
+data/scenario/
+
 # Python
 .venv/
 __pycache__/

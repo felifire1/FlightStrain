@@ -47,6 +47,14 @@ from agent.specialists.dev_server import (  # noqa: E402
     _traffic_event,
 )
 import json  # noqa: E402
+import httpx  # noqa: E402
+# Track 1 (PIREP -> turbulence area) + Track 2 (HRRR convective) ingest.
+# Both emit Findings with metadata["polygon"] (lat,lon) -> feed COORDINATOR.correlate().
+from agent.tools import get_pireps  # noqa: E402
+from agent.turbulence_area import pireps_to_hazards  # noqa: E402
+from agent import scenario_wx  # noqa: E402
+
+AW_API = "https://aviationweather.gov/api/data"  # NOAA aviation weather, keyless
 
 app = FastAPI(title="ASI Hack — 4D Airspace + Agent")
 
@@ -85,7 +93,16 @@ WATCH_CENTER = (42.0, -71.5)
 WATCH_RADIUS_DEG = 2.5
 WATCH_INTERVAL_SEC = 30
 
-_watcher: dict[str, Any] = {"task": None, "ticks": 0, "last_tick": 0.0, "last_error": None}
+# Convective track (Track 2). OFF by default — the live demo is unchanged unless
+# you opt in via WX_ASKED_AT=<scenario>, e.g. `WX_ASKED_AT=2025-08-22T18:00:00Z`.
+WX_ASKED_AT = os.environ.get("WX_ASKED_AT") or None
+WX_DBZ = float(os.environ.get("WX_DBZ", "40"))
+WX_MAX_CELLS = int(os.environ.get("WX_MAX_CELLS", "5"))  # cap cards/tick (avoid chat flood)
+
+_watcher: dict[str, Any] = {
+    "task": None, "ticks": 0, "last_tick": 0.0, "last_error": None,
+    "wx_strip_idx": 0, "wx_disabled": False, "wx_last_error": None, "wx_cells": 0,
+}
 
 # Static mounts. /frontend serves the Cesium UI; /data serves CZML and JSON
 # samples; existing relative paths like "../data/samples/traffic.czml" keep working.
@@ -229,6 +246,56 @@ def _collect_events() -> list[Event]:
     return evs
 
 
+def _fetch_advisories_raw() -> list[dict]:
+    """RAW G-AIRMET + SIGMET advisory dicts (each carrying `coords`) for the
+    turbulence-area corroboration — NOT the digested tool versions, which strip
+    the polygon geometry pireps_to_hazards needs."""
+    out: list[dict] = []
+    for path in ("gairmet", "airsigmet"):
+        try:
+            r = httpx.get(f"{AW_API}/{path}", params={"format": "json"}, timeout=10)
+            data = r.json() if r.status_code == 200 else None
+            if isinstance(data, list):
+                out.extend(data)
+        except Exception:
+            continue
+    return out
+
+
+def _fetch_turbulence_inputs() -> tuple[list[dict], list[dict]]:
+    """Blocking pull of the two Track-1 inputs for the watch box: digested PIREPs
+    (get_pireps' `reports` shape) and RAW G-AIRMET/SIGMET advisories with
+    polygons. Runs in a thread."""
+    lat, lon = WATCH_CENTER
+    rad = WATCH_RADIUS_DEG
+    try:
+        pr = get_pireps(lat - rad, lat + rad, lon - rad, lon + rad, age_hours=6)
+        pireps = pr.get("reports") or []
+    except Exception:
+        pireps = []
+    return pireps, _fetch_advisories_raw()
+
+
+def _collect_convective(strip_idx: int) -> tuple[list[Finding], tuple[float, float] | None]:
+    """Blocking pull for one convective-track tick (runs in a thread — np.load is
+    blocking). Picks the strip at `strip_idx` (wrapping over the ~73-strip, 18h
+    forecast), contours refc>=WX_DBZ into storm-cell Findings, returns the
+    strongest WX_MAX_CELLS plus the centroid of the strongest cell."""
+    strips = scenario_wx.list_strips(WX_ASKED_AT, "refc")
+    if not strips:
+        return [], None
+    strip = strips[strip_idx % len(strips)]
+    hazards = scenario_wx.hazard_polygons(WX_ASKED_AT, strip.valid_from, dbz=WX_DBZ)
+    hazards = hazards[:WX_MAX_CELLS]  # already strongest-first
+    centroid = None
+    if hazards:
+        poly = hazards[0].metadata.get("polygon") or []
+        if poly:
+            centroid = (sum(p[0] for p in poly) / len(poly),
+                        sum(p[1] for p in poly) / len(poly))
+    return hazards, centroid
+
+
 async def _alert_watcher() -> None:
     while True:
         try:
@@ -255,6 +322,40 @@ async def _alert_watcher() -> None:
                 ]
                 if hazards:
                     COORDINATOR.correlate(traffic_states, hazards)
+
+            # --- Track 1: PIREP -> turbulence-area hazards -> transit prediction ---
+            # Pilot ground-truth turned into confirmed/inferred area Findings, then
+            # projected against the same traffic snapshot.
+            pireps, advisories = await asyncio.to_thread(_fetch_turbulence_inputs)
+            turb_hazards = pireps_to_hazards(pireps, advisories, min_intensity="MOD")
+            for hz in turb_hazards:
+                bus.publish(hz)  # "PIREP CONFIRMS…" / "INFERRED…" (sev>=3 -> SSE push)
+            if turb_hazards and traffic_states:
+                COORDINATOR.correlate(traffic_states, turb_hazards)
+
+            # --- Track 2: HRRR convective grids -> storm-cell hazards -> transit ---
+            # Opt-in (WX_ASKED_AT). Pairs *live* aircraft with a *forecast* storm
+            # field — demonstrates the prediction mechanism on real planes. The
+            # fully coherent scenario (reconstructed routes.json traffic) is the
+            # integration script scripts/coherent_demo.py.
+            if WX_ASKED_AT and not _watcher["wx_disabled"]:
+                try:
+                    wx_hazards, centroid = await asyncio.to_thread(
+                        _collect_convective, _watcher["wx_strip_idx"])
+                    _watcher["wx_strip_idx"] += 1
+                    _watcher["wx_cells"] = len(wx_hazards)
+                    for hz in wx_hazards:
+                        bus.publish(hz)
+                    if wx_hazards and centroid:
+                        wx_traffic = await asyncio.to_thread(
+                            _fetch_traffic_bbox, centroid[0], centroid[1], WATCH_RADIUS_DEG)
+                        if wx_traffic:
+                            COORDINATOR.correlate(wx_traffic, wx_hazards)
+                    _watcher["wx_last_error"] = None
+                except Exception as e:
+                    _watcher["wx_disabled"] = True
+                    _watcher["wx_last_error"] = f"{type(e).__name__}: {e}"
+                    print(f"convective track disabled: {_watcher['wx_last_error']}", flush=True)
 
             _watcher["ticks"] += 1
             _watcher["last_tick"] = time.time()
@@ -337,6 +438,14 @@ def alerts_status():
         "last_error": _watcher["last_error"],
         "push_threshold": COORDINATOR.PUSH_THRESHOLD,
         "findings_in_bus": len(bus.latest(1000)),
+        "convective": {
+            "enabled": bool(WX_ASKED_AT),
+            "scenario": WX_ASKED_AT,
+            "disabled": _watcher["wx_disabled"],
+            "strip_idx": _watcher["wx_strip_idx"],
+            "cells_last_tick": _watcher["wx_cells"],
+            "last_error": _watcher["wx_last_error"],
+        },
     }
 
 
