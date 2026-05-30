@@ -33,6 +33,9 @@ from agent.specialists.traffic import TrafficAgent  # noqa: E402
 from agent.specialists.safety import SafetyAgent  # noqa: E402
 from agent.specialists.fleet import FleetAgent  # noqa: E402
 from agent.specialists.narrator import NarratorAgent  # noqa: E402
+from agent.specialists.pattern_analyst import PatternAnalystAgent  # noqa: E402
+from agent.specialists.conflict_predictor import ConflictPredictorAgent  # noqa: E402
+from agent.specialists.wind_router import WindRouterAgent  # noqa: E402
 from agent.specialists.base import Event, Finding  # noqa: E402
 from agent.specialists.bus import bus  # noqa: E402
 # Reuse the data-fetch helpers from the dev console so the watcher doesn't
@@ -54,6 +57,9 @@ SPECIALISTS = [
     SafetyAgent(),
     FleetAgent(),
     NarratorAgent(),
+    PatternAnalystAgent(),
+    ConflictPredictorAgent(),
+    WindRouterAgent(),
 ]
 COORDINATOR = Coordinator(specialists=SPECIALISTS)
 
