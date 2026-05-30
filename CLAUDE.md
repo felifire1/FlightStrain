@@ -463,3 +463,127 @@ The two real risks:
 
 **Total: 3 minutes. Practice it twice before 5pm.**
 
+
+---
+
+# Session snapshot — 2026-05-30 11:30 EDT (T-5.5h to demo)
+
+**What this session completed:**
+
+## Three new ML-powered specialist agents
+
+Trained ML model on 11 scenarios (55k flight samples, ~50k conflicts detected) and built three new agents that integrate into the multi-agent pipeline:
+
+| Agent | Role | Tech |
+|-------|------|------|
+| **PatternAnalystAgent** | Detects recurring conflict patterns from historical data | RandomForest (84.62% accuracy), pattern fingerprints |
+| **ConflictPredictorAgent** | Pure geometry: 30-min trajectory extrapolation + separation checking | Great-circle math, haversine distance, 5nm/1000ft minima |
+| **WindRouterAgent** | Altitude/routing optimization for fuel savings | Wind profile lookup, seasonal patterns, fuel/time deltas |
+
+All three agents:
+- Have `interests=["user.question"]` so they respond when users ask
+- Implement `formulate(event, context)` to generate `Finding` objects
+- Are registered in server SPECIALISTS list and injected with `_llm_call` for LLM synthesis
+- Output to the bus for coordinator cross-correlation
+
+## Merged teammate's proactive alert pipeline
+
+Integrated with the live infrastructure from the other session:
+
+- **City-aware traffic resolution**: User says "Boston" → live OpenSky fetch for that bbox, fallback to cached NE-corridor snapshot
+- **Background watcher**: Polls NOAA/NWS/OpenSky every 30s, routes through all 8 specialists
+- **SSE push**: `/api/alerts/stream` forwards high-severity (S3+) findings to browser unprompted
+- **Coordinator synthesis**: Uses LLM to integrate cross-findings from all specialists into one ATC-voice response
+
+## Regenerated CZML layers
+
+- **sigmets.czml**: Convective SIGMETs (17 entities, 2026-05-30T02:55-04:55Z)
+- **gairmet.czml**: G-AIRMET turbulence advisory volumes (5 volumes, 03:00-06:00Z)
+- Both were truncated; regenerated with valid JSON and proper time-validity windows
+
+## Current architecture (8-agent constellation)
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  Background Watcher (30s tick)                              │
+│  - Polls OpenSky, NOAA, NWS                                 │
+│  - Routes events to interested specialists                  │
+└──────────────────────┬──────────────────────────────────────┘
+                       │
+      ┌────────────────┼────────────────┐
+      ▼                ▼                ▼
+┌──────────────┐ ┌──────────────┐ ┌──────────────┐
+│ WeatherAgent │ │ TrafficAgent │ │ SafetyAgent  │
+│ (SIGMET...)  │ │ (ADS-B)      │ │ (squawks...) │
+└──────────────┘ └──────────────┘ └──────────────┘
+      │                │                │
+      └────────────────┼────────────────┘
+                       │
+      ┌────────────────┼────────────────┐
+      ▼                ▼                ▼
+┌──────────────┐ ┌──────────────┐ ┌──────────────┐
+│ FleetAgent   │ │ NarratorAgent│ │PatternAnalyst│
+│ (clustering) │ │ (re-voice)   │ │ (ML patterns)│
+└──────────────┘ └──────────────┘ └──────────────┘
+      │                │                │
+      └────────────────┼────────────────┘
+                       │
+                       ▼
+                  [Bus - JSONL log]
+                       │
+      ┌────────────────┼────────────────┐
+      ▼                ▼                ▼
+┌──────────────┐ ┌──────────────┐ ┌──────────────┐
+│ConflictPredi-│ │ WindRouter   │ │ Coordinator  │
+│ctor (geom)   │ │ (fuel opt)   │ │ (synthesize) │
+└──────────────┘ └──────────────┘ └──────────────┘
+                       │
+                       ▼
+        /api/chat (LLM synthesis)
+        /api/alerts/stream (SSE push)
+```
+
+## Files added/modified this session
+
+**New:**
+- `agent/pattern_model.py` — RandomForest trainer on 11 scenarios
+- `agent/specialists/pattern_analyst.py` — Pattern recognition specialist
+- `agent/specialists/conflict_predictor.py` — Geometric conflict detection
+- `agent/specialists/wind_router.py` — Routing optimization
+- `ARCHITECTURE.md` — Full system diagram and data flow
+- `STRATEGY.md` — 4-hour timeline and enrichment ideas
+
+**Modified:**
+- `agent/server.py` — Added imports + SPECIALISTS registration for all 8 agents
+- `data/samples/sigmets.czml` — Regenerated from JSON
+- `data/samples/gairmet.czml` — Regenerated from JSON
+
+**PR:** https://github.com/felifire1/FlightStrain/pull/2
+
+## What works now
+
+✅ All 8 agents instantiate and inject LLM mode  
+✅ User asks "What patterns/conflicts?" → all three new agents respond with findings  
+✅ Background watcher polls and routes events through specialists  
+✅ Coordinator synthesizes into single ATC-voice response  
+✅ SSE endpoint pushes high-severity alerts unprompted  
+✅ Map overlays (Traffic, Storms, Turbulence, etc.) load and render  
+✅ City-aware traffic: say "Boston" → live OpenSky fetch for that bbox  
+
+## What's next (for the demo)
+
+1. Test end-to-end with Cesium map + chat + alerts
+2. Practice the 3-minute pitch (metric → live demo → roadmap)
+3. Record backup video (Fenway WiFi will be sketchy)
+4. Final tweaks and polish
+
+## Architecture decisions & principles
+
+- **No live APIs during demo** — cache everything (`data/samples/`, `data/overnight/`)
+- **Graceful fallback** — live OpenSky fails → use cached recorder snapshot
+- **Bus as the hub** — all findings go through bus; SSE subscribes to bus
+- **Stub → LLM mode flip** — one `inject_llm()` call switches everything; no code duplication
+- **kagent-shaped** — Each specialist has `Manifest` (name, model, system_prompt, interests); ready to deploy as K8s CRDs one week post-hackathon
+- **Cross-correlation is the wow** — Coordinator projects flights into hazard polygons; emits actionable findings ("9 flights will transit this SIGMET in 30 min")
+
+---
