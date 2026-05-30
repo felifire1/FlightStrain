@@ -1,0 +1,28 @@
+# Credentials
+.env
+frontend/config.js
+
+# Data
+data/overnight/
+data/cache/aircraft_db.csv
+data/events/findings.jsonl
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+
+# Logs
+/tmp/
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
