@@ -132,6 +132,16 @@
     .msg .body { color: var(--text); white-space: pre-wrap; word-wrap: break-word; }
     .msg.user .body { color: #e6ebef; }
     .msg.thinking .body { color: var(--dim); font-style: italic; }
+    /* Proactive alerts pushed unprompted over SSE */
+    .msg.alert {
+      border-left: 2px solid var(--accent); padding-left: 8px;
+      background: rgba(255, 122, 24, 0.05); border-radius: 2px;
+      animation: alertIn 0.35s ease-out;
+    }
+    .msg.alert .who { color: var(--accent); }
+    .msg.alert.sev4, .msg.alert.sev5 { border-left-color: #ff4d4d; background: rgba(255, 77, 77, 0.07); }
+    .msg.alert.sev4 .who, .msg.alert.sev5 .who { color: #ff6b6b; }
+    @keyframes alertIn { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
     .msg .tools {
       margin-top: 6px; font-size: 10px; color: var(--dim);
       letter-spacing: 0.02em;
@@ -891,6 +901,51 @@
 
     // Welcome line — sets expectations
     addMsg("ai", "Dispatcher copilot ready. Ask me anything about the NAS — I can drive the map.");
+
+    // ============================================================
+    // PROACTIVE ALERTS — the agent speaks first
+    // ============================================================
+    // The server watches NOAA + NWS + OpenSky on a 30s loop and pushes any
+    // high-severity finding over SSE. We render it in the chat panel unprompted
+    // and enrich the map with non-camera-moving context (load a layer, draw the
+    // hazard polygon). We deliberately DON'T fire camera moves (fly_to) or
+    // entity-tracking (highlight_flight) from unprompted alerts so the agent
+    // never yanks the view out from under the presenter mid-demo.
+    const ALERT_PASSIVE_ACTIONS = new Set(["load_layer", "draw_polygon", "clear_polygons"]);
+
+    function addAlert(f) {
+      const sev = Number.isFinite(f.severity) ? f.severity : 0;
+      const spec = (f.specialist || "system").toUpperCase();
+      const div = document.createElement("div");
+      div.className = `msg alert sev${sev}`;
+      div.innerHTML = `<div class="who">⚠ ${spec} · SEV ${sev}</div><div class="body"></div>`;
+      div.querySelector(".body").textContent = f.text || "";
+      chatLog.appendChild(div);
+      chatLog.scrollTop = chatLog.scrollHeight;
+      return div;
+    }
+
+    let alertSource = null;
+    function connectAlerts() {
+      try {
+        alertSource = new EventSource("/api/alerts/stream");
+      } catch (e) {
+        console.warn("alerts: EventSource unavailable", e);
+        return;
+      }
+      alertSource.onmessage = async (e) => {
+        let f;
+        try { f = JSON.parse(e.data); } catch { return; }
+        addAlert(f);
+        for (const a of (f.map_actions || [])) {
+          if (!ALERT_PASSIVE_ACTIONS.has(a.action)) continue;
+          try { await executeMapAction(a); } catch (err) { console.error("alert map action failed", a, err); }
+        }
+      };
+      // EventSource auto-reconnects on transient errors; nothing to do but log.
+      alertSource.onerror = () => console.warn("alerts stream interrupted; browser will retry");
+    }
+    connectAlerts();
   </script>
 </body>
 </html>
